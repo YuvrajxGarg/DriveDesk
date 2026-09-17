@@ -608,7 +608,8 @@ class MainWindow(QMainWindow):
         self.mount_btn = self._toolbtn("Mount")
         self.mount_btn.setIcon(icons.mount_icon())
         self.mount_btn.clicked.connect(self.mount_dialog)
-        tb.addWidget(self.mount_btn)
+        if sys.platform == "win32":
+            tb.addWidget(self.mount_btn)
         self.options_btn = self._toolbtn("Options")
         self.options_btn.setIcon(icons.settings_icon())
         self.options_btn.clicked.connect(self.transfer_options_dialog)
@@ -800,14 +801,15 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         menu.addAction("Transfer options…", self.transfer_options_dialog)
         menu.addAction("Synchronize folders…", self.sync_dialog)
-        menu.addAction("Mount remote as drive…", self.mount_dialog)
+        if sys.platform == "win32":
+            menu.addAction("Mount remote as drive…", self.mount_dialog)
         if self.mounts:
             submenu = menu.addMenu("Unmount drive")
             for drive in sorted(self.mounts):
                 submenu.addAction(drive, lambda _=False, letter=drive: self.unmount(letter))
         menu.addSeparator()
         menu.addAction("Refresh accounts", self.load_accounts)
-        menu.addAction("Choose rclone.exe…", self.choose_rclone)
+        menu.addAction("Choose rclone executable…", self.choose_rclone)
         menu.addAction("rclone version", self.show_rclone_version)
         menu.addAction("Show rclone config location", self.show_config_location)
         menu.addSeparator()
@@ -864,7 +866,7 @@ class MainWindow(QMainWindow):
             )
             if answer == QMessageBox.StandardButton.Yes:
                 try:
-                    os.startfile(path)
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
                     self.close()
                 except OSError as exc:
                     QMessageBox.warning(self, "Could not launch installer", str(exc))
@@ -1088,7 +1090,7 @@ class MainWindow(QMainWindow):
 
     def show_rclone_version(self):
         if not self.rclone:
-            self.set_status("Select rclone.exe first.")
+            self.set_status("Select the rclone executable first.")
             return
         self.run_async(lambda: self.rclone.run("version", timeout=20),
                        lambda text: QMessageBox.information(self, "rclone version", text.strip()[:1200]),
@@ -1096,7 +1098,7 @@ class MainWindow(QMainWindow):
 
     def show_config_location(self):
         if not self.rclone:
-            self.set_status("Select rclone.exe first.")
+            self.set_status("Select the rclone executable first.")
             return
         self.run_async(lambda: self.rclone.run("config", "file", timeout=20),
                        lambda text: QMessageBox.information(self, "rclone config", text.strip()),
@@ -1180,7 +1182,7 @@ class MainWindow(QMainWindow):
         status = QLabel(self.binary_label.text() or "rclone not selected")
         status.setObjectName("muted")
         footer.addWidget(status, 1)
-        set_binary = QPushButton("Set rclone.exe…")
+        set_binary = QPushButton("Set rclone executable…")
         set_binary.clicked.connect(lambda: (dialog.accept(), self.choose_rclone()))
         footer.addWidget(set_binary)
         close = QPushButton("Close")
@@ -1294,7 +1296,7 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def choose_rclone(self):
-        filename, _ = QFileDialog.getOpenFileName(self, "Select rclone.exe", str(Path.home()), "Executables (*.exe);;All files (*)")
+        filename, _ = QFileDialog.getOpenFileName(self, "Select rclone executable", str(Path.home()), "Executables (*.exe);;All files (*)")
         if filename:
             self.rclone_path = filename
             self.rclone = Rclone(filename)
@@ -1966,7 +1968,7 @@ class MainWindow(QMainWindow):
                 self.remote_open(row, 0)
         elif pane.local:
             try:
-                os.startfile(entry.path)
+                QDesktopServices.openUrl(QUrl.fromLocalFile(entry.path))
             except OSError as exc:
                 self.set_status(f"Open: {exc}")
         elif entry.id:
@@ -2419,7 +2421,7 @@ class MainWindow(QMainWindow):
         folder = target if target.is_dir() else target.parent
         if folder.exists():
             try:
-                os.startfile(str(folder))
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
             except OSError as exc:
                 self.set_status(f"Open: {exc}")
         else:

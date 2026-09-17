@@ -15,6 +15,18 @@ class UpdaterTests(unittest.TestCase):
         with patch.object(updater, "fetch_latest_release", return_value={"tag": "v1.0.0"}):
             self.assertIsNone(updater.check_for_update("owner/repo", "1.0.0"))
 
+    def test_picks_platform_asset(self):
+        assets = [
+            {"name": "DriveDesk-Setup-1.0.1.exe", "browser_download_url": "windows"},
+            {"name": "DriveDesk-Setup-1.0.1-macos-arm64.dmg", "browser_download_url": "arm"},
+            {"name": "DriveDesk-Setup-1.0.1-macos-x64.dmg", "browser_download_url": "intel"},
+        ]
+        self.assertEqual(updater._pick_asset(assets, "win32"), "windows")
+        with patch.object(updater.platform_info, "machine", return_value="arm64"):
+            self.assertEqual(updater._pick_asset(assets, "darwin"), "arm")
+        with patch.object(updater.platform_info, "machine", return_value="x86_64"):
+            self.assertEqual(updater._pick_asset(assets, "darwin"), "intel")
+
 
 if __name__ == "__main__":
     unittest.main()

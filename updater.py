@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import json
 import os
+import platform as platform_info
+import sys
 import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Callable
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 GITHUB_REPO = "YuvrajxGarg/DriveDesk"
 
 
@@ -33,14 +35,22 @@ def is_newer(latest: str, current: str) -> bool:
     return parse_version(latest) > parse_version(current)
 
 
-def _pick_asset(assets: list) -> str:
-    for asset in assets or []:
-        name = (asset.get("name") or "").lower()
-        if name.endswith(".exe"):
-            return asset.get("browser_download_url", "")
-    for asset in assets or []:
-        if (asset.get("name") or "").lower().endswith(".zip"):
-            return asset.get("browser_download_url", "")
+def _pick_asset(assets: list, platform: str | None = None) -> str:
+    platform = platform or sys.platform
+    endings = ((".exe",) if platform == "win32" else
+               ((".dmg", ".zip") if platform == "darwin" else (".AppImage", ".tar.gz", ".zip")))
+    preferred_arch = ""
+    if platform == "darwin":
+        preferred_arch = "arm64" if platform_info.machine().lower() in ("arm64", "aarch64") else "x64"
+    for ending in endings:
+        matching = [asset for asset in assets or []
+                    if (asset.get("name") or "").lower().endswith(ending.lower())]
+        if preferred_arch:
+            for asset in matching:
+                if preferred_arch in (asset.get("name") or "").lower():
+                    return asset.get("browser_download_url", "")
+        if matching:
+            return matching[0].get("browser_download_url", "")
     return ""
 
 
@@ -76,7 +86,7 @@ def download_update(info: dict, *, progress: Callable[[int, int], None] | None =
     """
     asset_url = info.get("asset", "")
     if not asset_url:
-        raise ValueError("This release does not contain a Windows installer asset.")
+        raise ValueError("This release does not contain an installer for your operating system.")
     filename = Path(urllib.request.url2pathname(asset_url.split("?")[0])).name
     if not filename.lower().endswith((".exe", ".zip")):
         filename = "DriveDesk-update.exe"

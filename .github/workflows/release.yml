@@ -11,7 +11,20 @@ permissions:
 
 jobs:
   release:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+            rclone_url: https://downloads.rclone.org/rclone-current-windows-amd64.zip
+          - os: macos-13
+            platform: macos-x64
+            rclone_url: https://downloads.rclone.org/rclone-current-osx-amd64.zip
+          - os: macos-14
+            platform: macos-arm64
+            rclone_url: https://downloads.rclone.org/rclone-current-osx-arm64.zip
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -25,28 +38,48 @@ jobs:
         run: python -m pip install -r requirements.txt pyinstaller
 
       - name: Download rclone
-        shell: pwsh
+        shell: bash
         run: |
-          New-Item -ItemType Directory -Force third_party | Out-Null
-          Invoke-WebRequest -Uri "https://downloads.rclone.org/rclone-current-windows-amd64.zip" -OutFile rclone.zip
-          Expand-Archive rclone.zip -DestinationPath rclone-expanded
-          Copy-Item (Get-ChildItem rclone-expanded -Recurse -Filter rclone.exe | Select-Object -First 1).FullName third_party\rclone.exe
+          mkdir -p third_party
+          curl -L "${{ matrix.rclone_url }}" -o rclone.zip
+          unzip -q rclone.zip -d rclone-expanded
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            cp "$(find rclone-expanded -name rclone.exe | head -1)" third_party/rclone.exe
+          else
+            cp "$(find rclone-expanded -name rclone | head -1)" third_party/rclone
+            chmod +x third_party/rclone
+          fi
 
       - name: Build executable
+        if: matrix.platform == 'windows'
         run: python -m PyInstaller --noconfirm --clean DriveDesk.spec
 
+      - name: Build macOS app
+        if: startsWith(matrix.platform, 'macos-')
+        run: python -m PyInstaller --noconfirm --clean DriveDesk-mac.spec
+
       - name: Install Inno Setup
+        if: matrix.platform == 'windows'
         shell: pwsh
         run: choco install innosetup --no-progress -y
 
       - name: Build installer
+        if: matrix.platform == 'windows'
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}" -replace '^v', ''
           iscc "/DAppVersion=$version" installer\DriveDesk.iss
 
+      - name: Build macOS disk image
+        if: startsWith(matrix.platform, 'macos-')
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist/installer
+          hdiutil create -volname DriveDesk -srcfolder dist/DriveDesk.app -ov -format UDZO "dist/installer/DriveDesk-Setup-${version}-${{ matrix.platform }}.dmg"
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: dist/installer/DriveDesk-Setup-*.exe
+          files: dist/installer/*

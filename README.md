@@ -1,6 +1,6 @@
 # DriveDesk
 
-A Windows desktop file browser for Google Drive remotes already configured in rclone. It provides side-by-side PC and Drive browsing, uploads, downloads, and a **Shared with me** view grouped by file owner.
+A cross-platform desktop file browser for Google Drive remotes already configured in rclone. It provides side-by-side local and Drive browsing, uploads, downloads, and a **Shared with me** view grouped by file owner.
 
 ## Run
 
@@ -31,7 +31,14 @@ is pushed (for example, `git tag v1.0.1; git push origin v1.0.1`). DriveDesk's
 **Tools → Check for updates…** menu checks the latest GitHub Release, downloads
 the installer asset, and offers to restart into it.
 
-DriveDesk looks for `rclone.exe` on PATH and in common Windows install folders, including Downloads. If it cannot find it, choose the executable from the app.
+macOS releases are published as native `.dmg` installers for both Intel and
+Apple Silicon Macs. Open the matching DMG, drag DriveDesk to Applications, and
+launch it normally. The macOS build includes the rclone executable and does
+not require Python or a terminal. Mounting a remote as a drive letter remains
+Windows-only; browsing, transfers, synchronization, accounts, and updates are
+available on macOS.
+
+DriveDesk looks for `rclone` on PATH and in common install folders, including Downloads. If it cannot find it, choose the executable from the app.
 
 The app reads your existing rclone configuration; it does not store or display OAuth tokens. Choose **Add Google account** to open Google's sign-in page in your browser. Select the account there; DriveDesk completes rclone configuration in the background without opening a command prompt. Google may require a separate OAuth client ID if rclone's shared client has been retired.
 

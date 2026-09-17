@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -43,20 +44,30 @@ def network_env() -> dict[str, str]:
 def find_rclone(saved: str = "") -> str | None:
     candidates = [saved, shutil.which("rclone")]
     home = Path.home()
+    if getattr(sys, "frozen", False):
+        executable_dir = Path(sys.executable).resolve().parent
+        candidates += [str(executable_dir / "rclone"), str(executable_dir / "rclone.exe")]
+        meipass = getattr(sys, "_MEIPASS", "")
+        if meipass:
+            candidates += [str(Path(meipass) / "rclone"), str(Path(meipass) / "rclone.exe")]
     candidates += [
         str(home / "scoop/apps/rclone/current/rclone.exe"),
         str(home / "AppData/Local/Programs/rclone/rclone.exe"),
         r"C:\Program Files\rclone\rclone.exe",
         r"C:\ProgramData\chocolatey\bin\rclone.exe",
+        str(home / ".local/bin/rclone"),
+        "/opt/homebrew/bin/rclone",
+        "/usr/local/bin/rclone",
     ]
     for candidate in candidates:
         if candidate and Path(candidate).is_file():
             return str(Path(candidate).resolve())
     downloads = home / "Downloads"
     if downloads.is_dir():
-        for candidate in downloads.glob("rclone*/**/rclone.exe"):
-            if candidate.is_file():
-                return str(candidate.resolve())
+        for pattern in ("rclone*/**/rclone.exe", "rclone*/**/rclone"):
+            for candidate in downloads.glob(pattern):
+                if candidate.is_file():
+                    return str(candidate.resolve())
     return None
 
 

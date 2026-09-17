@@ -1,7 +1,7 @@
 ; Inno Setup installer for DriveDesk.
 #define AppName "DriveDesk"
 #ifndef AppVersion
-  #define AppVersion "1.0.1"
+  #define AppVersion "1.0.2"
 #endif
 #define AppPublisher "Work with Yuvraj Garg"
 #define AppExeName "DriveDesk.exe"
