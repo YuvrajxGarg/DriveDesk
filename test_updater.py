@@ -27,6 +27,12 @@ class UpdaterTests(unittest.TestCase):
         with patch.object(updater.platform_info, "machine", return_value="x86_64"):
             self.assertEqual(updater._pick_asset(assets, "darwin"), "intel")
 
+    def test_missing_release_has_user_facing_error(self):
+        error = updater.urllib.error.HTTPError("url", 404, "not found", {}, None)
+        with patch.object(updater.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaisesRegex(updater.UpdaterError, "No published DriveDesk release"):
+                updater.fetch_latest_release("YuvrajxGarg/DriveDesk")
+
 
 if __name__ == "__main__":
     unittest.main()

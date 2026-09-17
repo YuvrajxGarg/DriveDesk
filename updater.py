@@ -17,8 +17,12 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 GITHUB_REPO = "YuvrajxGarg/DriveDesk"
+
+
+class UpdaterError(RuntimeError):
+    """A user-facing update service error."""
 
 
 def parse_version(tag: str) -> tuple[int, ...]:
@@ -58,8 +62,15 @@ def fetch_latest_release(repo: str, *, timeout: int = 12) -> dict:
     url = f"https://api.github.com/repos/{repo}/releases/latest"
     request = urllib.request.Request(
         url, headers={"Accept": "application/vnd.github+json", "User-Agent": "DriveDesk-Updater"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        data = json.load(response)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = json.load(response)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise UpdaterError("No published DriveDesk release was found on GitHub yet.") from exc
+        raise UpdaterError(f"GitHub returned HTTP {exc.code} while checking for updates.") from exc
+    except urllib.error.URLError as exc:
+        raise UpdaterError(f"Could not reach GitHub: {exc.reason}") from exc
     return {
         "tag": data.get("tag_name", ""),
         "url": data.get("html_url", ""),
@@ -88,8 +99,8 @@ def download_update(info: dict, *, progress: Callable[[int, int], None] | None =
     if not asset_url:
         raise ValueError("This release does not contain an installer for your operating system.")
     filename = Path(urllib.request.url2pathname(asset_url.split("?")[0])).name
-    if not filename.lower().endswith((".exe", ".zip")):
-        filename = "DriveDesk-update.exe"
+    if not filename.lower().endswith((".exe", ".dmg", ".zip", ".appimage", ".tar.gz")):
+        filename = "DriveDesk-update.exe" if sys.platform == "win32" else "DriveDesk-update.dmg"
     target_dir = Path(destination) if destination else Path(tempfile.gettempdir()) / "DriveDesk-updates"
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / filename
