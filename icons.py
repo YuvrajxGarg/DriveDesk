@@ -229,6 +229,60 @@ def link_icon() -> QIcon:
     return QIcon(pixmap)
 
 
+@lru_cache(maxsize=None)
+def settings_icon() -> QIcon:
+    pixmap, p, s = _canvas()
+    p.setPen(QPen(QColor("#B8C1D4"), s * 0.095))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawEllipse(QRectF(s * 0.28, s * 0.28, s * 0.44, s * 0.44))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor("#B8C1D4"))
+    for angle in range(0, 360, 45):
+        rad = math.radians(angle)
+        cx = s * 0.5 + math.cos(rad) * s * 0.35
+        cy = s * 0.5 + math.sin(rad) * s * 0.35
+        p.save()
+        p.translate(cx, cy)
+        p.rotate(angle)
+        p.drawRoundedRect(QRectF(-s * 0.055, -s * 0.10, s * 0.11, s * 0.20), s * 0.035, s * 0.035)
+        p.restore()
+    p.setBrush(QColor("#252933"))
+    p.drawEllipse(QRectF(s * 0.42, s * 0.42, s * 0.16, s * 0.16))
+    p.end()
+    return QIcon(pixmap)
+
+
+@lru_cache(maxsize=None)
+def mount_icon() -> QIcon:
+    pixmap, p, s = _canvas()
+    p.setPen(QPen(QColor("#B8C1D4"), s * 0.08))
+    p.setBrush(QColor("#3D4658"))
+    p.drawRoundedRect(QRectF(s * 0.13, s * 0.24, s * 0.74, s * 0.52), s * 0.10, s * 0.10)
+    p.setPen(QPen(QColor("#7EA6F2"), s * 0.08))
+    p.drawLine(QPointF(s * 0.28, s * 0.40), QPointF(s * 0.72, s * 0.40))
+    p.drawLine(QPointF(s * 0.28, s * 0.58), QPointF(s * 0.58, s * 0.58))
+    p.setBrush(QColor("#7EA6F2"))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawEllipse(QRectF(s * 0.66, s * 0.53, s * 0.12, s * 0.12))
+    p.end()
+    return QIcon(pixmap)
+
+
+@lru_cache(maxsize=None)
+def toolbox_icon() -> QIcon:
+    pixmap, p, s = _canvas()
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor("#C8A35B"))
+    p.drawRoundedRect(QRectF(s * 0.12, s * 0.34, s * 0.76, s * 0.48), s * 0.08, s * 0.08)
+    p.setBrush(QColor("#E0BD6E"))
+    p.drawRoundedRect(QRectF(s * 0.30, s * 0.20, s * 0.40, s * 0.22), s * 0.06, s * 0.06)
+    p.setBrush(QColor("#5D4A2B"))
+    p.drawRect(QRectF(s * 0.12, s * 0.48, s * 0.76, s * 0.09))
+    p.drawRoundedRect(QRectF(s * 0.43, s * 0.44, s * 0.14, s * 0.17), s * 0.03, s * 0.03)
+    p.end()
+    return QIcon(pixmap)
+
+
 def app_logo_pixmap(size: int = 512) -> QPixmap:
     """The DriveDesk brand mark: a gradient tile with a cloud and up/down transfer arrows."""
     s = float(size)

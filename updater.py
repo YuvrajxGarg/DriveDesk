@@ -15,8 +15,8 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
-APP_VERSION = "1.0.0"
-GITHUB_REPO = "workwithyuvrajgarg/DriveDesk"
+APP_VERSION = "1.0.1"
+GITHUB_REPO = "YuvrajxGarg/DriveDesk"
 
 
 def parse_version(tag: str) -> tuple[int, ...]:

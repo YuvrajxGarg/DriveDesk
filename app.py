@@ -31,12 +31,17 @@ STYLE = """
 QMainWindow, QWidget { background: #1c1d20; color: #dfe1e5; }
 QToolTip { background: #2a2c30; color: #e6e8ec; border: 1px solid #3a3c42; }
 QLabel#brand { font-size: 16px; font-weight: 700; color: #f2f3f5; }
+QFrame#brandmark { background: transparent; }
 QLabel#muted { color: #7f828b; }
+QLabel#statusdot { color: #55C98A; font-size: 11px; }
+QLabel#statvalue { color: #D9DDE5; font-weight: 600; }
+QLabel#downstat { color: #8BB7FF; font-weight: 600; }
+QLabel#upstat { color: #C5A4FF; font-weight: 600; }
 QLabel#heading { font-size: 13px; font-weight: 650; color: #e7e9ec; }
 QLabel#panetab { font-size: 13px; font-weight: 650; color: #eef0f3; }
 
 QFrame#topbar { background: #202124; border-bottom: 1px solid #34363c; }
-QFrame#statusbar { background: #202124; border-top: 1px solid #34363c; }
+QFrame#statusbar { background: transparent; border-top: 1px solid #303238; }
 QFrame#toolsep { background: #34363c; max-width: 1px; }
 
 QFrame#panel { background: #25262a; border: 1px solid #34363c; border-radius: 9px; }
@@ -521,7 +526,8 @@ class FilePane(QFrame):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DriveDesk · rclone file explorer")
+        self.setWindowTitle("DriveDesk")
+        self.setWindowIcon(icons.app_logo())
         self.resize(1380, 820)
         self.settings = QSettings("DriveDesk", "DriveDesk")
         self.rclone_path = find_rclone(self.settings.value("rclone_path", ""))
@@ -569,31 +575,47 @@ class MainWindow(QMainWindow):
         rootcol.setContentsMargins(0, 0, 0, 0)
         rootcol.setSpacing(0)
 
-        # ----- top toolbar (intentional groups: accounts · transfer tools · utilities) -----
+        # ----- top toolbar: brand · workspace · drive tools · utilities -----
         topbar = QFrame()
         topbar.setObjectName("topbar")
         tb = QHBoxLayout(topbar)
-        tb.setContentsMargins(12, 6, 12, 6)
-        tb.setSpacing(4)
-        brand = QLabel("◈  DriveDesk")
-        brand.setObjectName("brand")
+        tb.setContentsMargins(16, 8, 16, 8)
+        tb.setSpacing(3)
+        brand = QFrame()
+        brand.setObjectName("brandmark")
+        brand_layout = QHBoxLayout(brand)
+        brand_layout.setContentsMargins(0, 0, 12, 0)
+        brand_layout.setSpacing(8)
+        logo = QLabel()
+        logo.setPixmap(icons.app_logo_pixmap(30))
+        logo.setFixedSize(30, 30)
+        brand_layout.addWidget(logo)
+        brand_text = QLabel("DriveDesk")
+        brand_text.setObjectName("brand")
+        brand_layout.addWidget(brand_text)
         tb.addWidget(brand)
-        tb.addSpacing(14)
-        self.accounts_btn = self._toolbtn("👤  Accounts")
+        tb.addWidget(self._toolsep())
+        tb.addSpacing(8)
+        self.accounts_btn = self._toolbtn("Accounts")
+        self.accounts_btn.setIcon(icons.people_icon())
         self.accounts_btn.clicked.connect(self.account_manager_dialog)
         tb.addWidget(self.accounts_btn)
         tb.addWidget(self._toolsep())
-        self.sync_btn = self._toolbtn("🔄  Synchronize")
+        self.sync_btn = self._toolbtn("Synchronize")
+        self.sync_btn.setIcon(icons.refresh_icon())
         self.sync_btn.clicked.connect(self.sync_dialog)
         tb.addWidget(self.sync_btn)
-        self.mount_btn = self._toolbtn("💽  Mount")
+        self.mount_btn = self._toolbtn("Mount")
+        self.mount_btn.setIcon(icons.mount_icon())
         self.mount_btn.clicked.connect(self.mount_dialog)
         tb.addWidget(self.mount_btn)
-        self.options_btn = self._toolbtn("⚙  Options")
+        self.options_btn = self._toolbtn("Options")
+        self.options_btn.setIcon(icons.settings_icon())
         self.options_btn.clicked.connect(self.transfer_options_dialog)
         tb.addWidget(self.options_btn)
         tb.addWidget(self._toolsep())
-        self.tools_btn = self._toolbtn("🧰  Tools")
+        self.tools_btn = self._toolbtn("Tools")
+        self.tools_btn.setIcon(icons.toolbox_icon())
         self.tools_btn.clicked.connect(self.show_tools_menu)
         tb.addWidget(self.tools_btn)
         tb.addStretch()
@@ -713,13 +735,16 @@ class MainWindow(QMainWindow):
         statusbar = QFrame()
         statusbar.setObjectName("statusbar")
         sb = QHBoxLayout(statusbar)
-        sb.setContentsMargins(14, 5, 14, 5)
-        sb.setSpacing(14)
+        sb.setContentsMargins(16, 7, 16, 7)
+        sb.setSpacing(9)
+        self.status_dot = QLabel("●")
+        self.status_dot.setObjectName("statusdot")
+        sb.addWidget(self.status_dot)
         self.status = QLabel("Ready")
         self.status.setObjectName("muted")
         sb.addWidget(self.status, 1)
         self.total_label = QLabel("")
-        self.total_label.setObjectName("muted")
+        self.total_label.setObjectName("statvalue")
         sb.addWidget(self.total_label)
         self.total_bar = QProgressBar()
         self.total_bar.setObjectName("total")
@@ -729,9 +754,13 @@ class MainWindow(QMainWindow):
         self.total_bar.setTextVisible(False)
         self.total_bar.hide()
         sb.addWidget(self.total_bar)
-        self.speed_label = QLabel("↓ —   ↑ —")
-        self.speed_label.setObjectName("muted")
-        sb.addWidget(self.speed_label)
+        sb.addWidget(self._toolsep())
+        self.download_label = QLabel("↓ —")
+        self.download_label.setObjectName("downstat")
+        sb.addWidget(self.download_label)
+        self.upload_label = QLabel("↑ —")
+        self.upload_label.setObjectName("upstat")
+        sb.addWidget(self.upload_label)
         rootcol.addWidget(statusbar)
 
         self.transfer_timer = QTimer(self)
@@ -745,6 +774,7 @@ class MainWindow(QMainWindow):
     def _toolbtn(self, text: str, *, checkable: bool = False) -> QPushButton:
         button = QPushButton(text)
         button.setObjectName("toolbtn")
+        button.setIconSize(QSize(18, 18))
         button.setCheckable(checkable)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         return button
@@ -2416,13 +2446,15 @@ class MainWindow(QMainWindow):
         if not states:
             self.total_bar.hide()
             self.total_label.setText("")
-            self.speed_label.setText("↓ —   ↑ —")
+            self.download_label.setText("↓ —")
+            self.upload_label.setText("↑ —")
             return
         done = sum(state["done"] for state in states)
         grand = sum(state["total"] for state in states)
         up = sum(state["speed_bps"] for state in states if state["upload"])
         down = sum(state["speed_bps"] for state in states if not state["upload"])
-        self.speed_label.setText(f"↓ {speed_text(down)}   ↑ {speed_text(up)}")
+        self.download_label.setText(f"↓ {speed_text(down)}")
+        self.upload_label.setText(f"↑ {speed_text(up)}")
         if grand > 0:
             self.total_bar.show()
             self.total_bar.setValue(int(done * 100 / grand))
