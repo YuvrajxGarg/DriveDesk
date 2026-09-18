@@ -35,6 +35,10 @@ FIELDS = "nextPageToken,files(id,name,mimeType,size,modifiedTime,resourceKey,own
 
 
 class GoogleDriveAPI:
+    def wait_if_paused(self):
+        """Overridden by the transfer worker for cooperative chunk pauses."""
+        pass
+
     _preferred: dict[str, str] = {}
     _preference_lock = Lock()
 
@@ -362,6 +366,7 @@ class GoogleDriveAPI:
         upload_chunk_size = 64 * 1024 * 1024
         with local_path.open("rb") as source:
             while sent < size or (size == 0 and sent == 0):
+                self.wait_if_paused()
                 if cancelled.is_set():
                     raise RcloneError("Cancelled")
                 chunk = source.read(upload_chunk_size)

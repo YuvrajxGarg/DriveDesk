@@ -8,16 +8,19 @@ import subprocess
 import sys
 import time
 import uuid
+import psutil
 import urllib.request
+from mount_monitor import snapshot as mount_snapshot
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock, Thread
+from collections import deque
 
 from PyQt6.QtCore import QMimeData, QObject, QRunnable, QSettings, QSize, Qt, QThreadPool, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QDrag, QIcon
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-    QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QPushButton, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QSpinBox, QSlider,
     QInputDialog, QProgressDialog, QStyle,
     QWidget, QAbstractItemView, QHeaderView, QProgressBar, QTreeWidget, QTreeWidgetItem,
 )
@@ -28,117 +31,7 @@ from google_api import GoogleDriveAPI
 from updater import APP_VERSION, GITHUB_REPO, check_for_update, download_update
 
 
-STYLE = """
-* { font-family: 'Segoe UI'; font-size: 13px; }
-QMainWindow, QWidget { background: #1c1d20; color: #dfe1e5; }
-QToolTip { background: #2a2c30; color: #e6e8ec; border: 1px solid #3a3c42; }
-QLabel#brand { font-size: 16px; font-weight: 700; color: #f2f3f5; }
-QFrame#brandmark { background: transparent; }
-QLabel#muted { color: #7f828b; }
-QLabel#statusdot { color: #55C98A; font-size: 11px; }
-QLabel#statvalue { color: #D9DDE5; font-weight: 600; }
-QLabel#downstat { color: #8BB7FF; font-weight: 600; }
-QLabel#upstat { color: #C5A4FF; font-weight: 600; }
-QLabel#heading { font-size: 13px; font-weight: 650; color: #e7e9ec; }
-QLabel#panetab { font-size: 13px; font-weight: 650; color: #eef0f3; }
-
-QFrame#topbar { background: #202124; border-bottom: 1px solid #34363c; }
-QFrame#statusbar { background: transparent; border-top: 1px solid #303238; }
-QFrame#toolsep { background: #34363c; max-width: 1px; }
-
-QFrame#panel { background: #25262a; border: 1px solid #34363c; border-radius: 9px; }
-QFrame#panel QLabel { background: transparent; }
-QFrame#panehead { background: #2a2c30; border: 1px solid #34363c; border-top-left-radius: 8px; border-top-right-radius: 8px; }
-
-QFrame#sidebar { background: #171819; border-right: 1px solid #2b2d31; }
-QFrame#sidebar QLabel { color: #d3d6dc; background: transparent; }
-QFrame#sidebar QLabel#muted { color: #6b6e77; letter-spacing: 1px; }
-
-QPushButton { background: #2a2c31; border: 1px solid #3a3c42; border-radius: 6px; padding: 6px 12px; color: #d7dae0; }
-QPushButton:hover { background: #33363c; border-color: #4a4d55; }
-QPushButton:disabled { color: #61646c; background: #232428; border-color: #2f3136; }
-QPushButton#primary { background: #2f6df0; border-color: #2f6df0; color: white; font-weight: 600; }
-QPushButton#primary:hover { background: #3f79f3; }
-QPushButton#primary:disabled { background: #26426f; border-color: #26426f; color: #9fb4d8; }
-QPushButton#toolbtn { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 7px 12px; color: #c7cad1; }
-QPushButton#toolbtn:hover { background: #2e3037; }
-QPushButton#toolbtn:checked { background: #24365a; color: #ffffff; border-color: #345085; }
-QPushButton#paneicon { background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 5px 9px; color: #c7cad1; }
-QPushButton#paneicon:hover { background: #34363d; }
-QFrame#addressbar { background: #202226; border: 1px solid #34363c; border-radius: 8px; }
-QFrame#addressbar QLineEdit#addressline { background: transparent; border: 0; padding: 6px 6px; }
-QPushButton#navbtn { background: #2b2d32; border: 1px solid #3a3c42; border-radius: 7px; }
-QPushButton#navbtn:hover { background: #363940; border-color: #4c505a; }
-QPushButton#navbtn:pressed { background: #2f323a; }
-QPushButton#navbtn:disabled { background: #232428; border-color: #2f3136; }
-QFrame#sidebar QPushButton { background: #23252a; color: #d7dae0; border-color: #33353b; }
-QFrame#sidebar QPushButton:hover { background: #2c2f35; }
-QFrame#sidebar QPushButton#primary { background: #2f6df0; border-color: #2f6df0; color: #fff; }
-
-QLineEdit { background: #1f2125; border: 1px solid #34363c; border-radius: 6px; padding: 7px 9px; color: #dfe1e5; selection-background-color: #2f6df0; }
-QLineEdit:focus { border: 1px solid #4a86e8; }
-QLineEdit[readOnly="true"] { background: #1a1b1e; color: #b6bac2; }
-
-QListWidget, QTableWidget, QTreeWidget { background: transparent; border: 0; outline: 0; gridline-color: #2a2b2f; }
-QListWidget::item { padding: 8px 10px; border-radius: 6px; margin: 2px 3px; color: #cbced4; }
-QFrame#sidebar QListWidget::item { color: #c9cdd4; }
-QListWidget::item:selected { background: #24365a; color: #ffffff; }
-QFrame#sidebar QListWidget::item:selected { background: #283b60; color: #ffffff; }
-QTableWidget { alternate-background-color: #222327; }
-QTableWidget[dragOver="true"] { border: 2px dashed #4a86e8; border-radius: 8px; background: #22304a; }
-QTableWidget::item { padding: 3px 6px; border-bottom: 1px solid #282a2e; color: #d5d8de; }
-QTableWidget::item:selected { background: #2b3f63; color: #ffffff; }
-QTreeWidget { color: #d5d8de; }
-QTreeWidget::item { color: #d5d8de; }
-QTreeWidget::item:selected { background: #2b3f63; color: #ffffff; }
-QTreeWidget::branch { background: transparent; }
-QTreeWidget#transfers::item { padding: 4px 4px; border-bottom: 1px solid #26272b; }
-QHeaderView::section { background: #202124; color: #7f828b; border: 0; border-bottom: 1px solid #303136; padding: 8px 8px; font-weight: 600; }
-QScrollBar:vertical { background: transparent; width: 11px; margin: 0; }
-QScrollBar::handle:vertical { background: #3b3d44; border-radius: 5px; min-height: 30px; }
-QScrollBar::handle:vertical:hover { background: #4a4d55; }
-QScrollBar:horizontal { background: transparent; height: 11px; margin: 0; }
-QScrollBar::handle:horizontal { background: #3b3d44; border-radius: 5px; min-width: 30px; }
-QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
-QCheckBox { color: #aeb2ba; spacing: 7px; }
-QCheckBox::indicator { width: 15px; height: 15px; border: 1px solid #4a4d55; border-radius: 4px; background: #26282c; }
-QCheckBox::indicator:checked { background: #2f6df0; border-color: #2f6df0; }
-QMenu { background: #26272b; color: #dcdee3; border: 1px solid #3a3c42; padding: 4px; }
-QMenu::item { padding: 6px 22px 6px 14px; border-radius: 5px; }
-QMenu::item:selected { background: #2b3f63; }
-QMenu::separator { height: 1px; background: #34363c; margin: 4px 6px; }
-QSplitter::handle { background: #26272b; }
-QSplitter::handle:hover { background: #34363c; }
-QProgressBar { background: #303136; border: 0; border-radius: 5px; min-height: 15px; max-height: 18px; text-align: center; color: #e4e6ea; font-size: 11px; }
-QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4a86e8, stop:1 #2f6df0); border-radius: 5px; }
-QProgressBar[state="done"]::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #37b06a, stop:1 #2f9e5f); }
-QProgressBar[state="failed"]::chunk { background: #d75b60; }
-QProgressBar#total { min-height: 11px; max-height: 13px; }
-QProgressBar#total::chunk { background: #37b06a; border-radius: 5px; }
-QPushButton#linkbtn { background: transparent; border: 0; color: #8b8f97; padding: 4px 8px; }
-QPushButton#linkbtn:hover { color: #4a86e8; }
-QPushButton#tinycancel { background: #3a2626; border: 1px solid #5a3737; color: #e79a9d; border-radius: 6px; padding: 3px 12px; }
-QPushButton#tinycancel:hover { background: #472d2d; }
-QPushButton#accounttab { background: #2f3238; border: 1px solid #3d4046; border-radius: 7px; padding: 6px 12px; color: #eef0f3; font-weight: 650; }
-QPushButton#accounttab:hover { background: #383b42; border-color: #4c5058; }
-QPushButton#accounttab::menu-indicator { image: none; width: 0; }
-QLineEdit#search { background: #26282c; border: 1px solid #3a3c42; border-radius: 15px; padding: 6px 12px; }
-QLineEdit#search:focus { border-color: #4a86e8; background: #202226; }
-QComboBox { background: #26282c; border: 1px solid #3a3c42; border-radius: 6px; padding: 6px 10px; color: #dfe1e5; }
-QComboBox:hover { border-color: #4a4d55; }
-QComboBox:focus { border-color: #4a86e8; }
-QComboBox::drop-down { border: 0; width: 22px; }
-QComboBox::down-arrow { image: none; width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 6px solid #9aa0aa; margin-right: 9px; }
-QComboBox QAbstractItemView { background: #26272b; border: 1px solid #3a3c42; outline: 0; color: #dcdee3; selection-background-color: #2b3f63; selection-color: #ffffff; padding: 3px; }
-QDialog { background: #1f2023; }
-QDialog QLabel { color: #dfe1e5; background: transparent; }
-QDialog QListWidget { background: #1a1b1e; border: 1px solid #34363c; border-radius: 7px; }
-QDialog QListWidget::item { padding: 8px 10px; border-radius: 5px; margin: 1px 3px; color: #d5d8de; }
-QDialog QListWidget::item:selected { background: #2b3f63; color: #ffffff; }
-QMessageBox, QInputDialog, QProgressDialog { background: #1f2023; }
-QMessageBox QLabel, QInputDialog QLabel, QProgressDialog QLabel { color: #dfe1e5; background: transparent; }
-QProgressDialog QProgressBar { min-height: 8px; max-height: 10px; }
-"""
+from theme import STYLE
 
 ALL_SHARED = "@all-shared"
 
@@ -147,8 +40,8 @@ def size_text(size: int) -> str:
     if size < 0:
         return "—"
     value = float(size)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if value < 1024 or unit == "TB":
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
             return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
         value /= 1024
     return "—"
@@ -207,9 +100,22 @@ class TransferWorker(QRunnable):
         self.signals = TransferSignals()
         self.cancelled = Event()
         self.process = None
+        self.paused = False
+        self.process_lock = Lock()
+
+    def set_paused(self, paused):
+        with self.process_lock:
+            if self.process and self.process.poll() is None:
+                process = psutil.Process(self.process.pid)
+                process.suspend() if paused else process.resume()
+            self.paused = paused
 
     def cancel(self):
         self.cancelled.set()
+        try:
+            self.set_paused(False)
+        except psutil.NoSuchProcess:
+            pass
         if self.process and self.process.poll() is None:
             self.process.terminate()
 
@@ -221,7 +127,10 @@ class TransferWorker(QRunnable):
                 env=network_env(),
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-            self.process = proc
+            with self.process_lock:
+                self.process = proc
+                if self.paused:
+                    psutil.Process(proc.pid).suspend()
             if self.cancelled.is_set():
                 proc.terminate()
             last_error = ""
@@ -263,6 +172,18 @@ class ApiTransferWorker(QRunnable):
     def cancel(self):
         self.cancelled.set()
 
+    @property
+    def paused(self):
+        return getattr(self, "_paused", False)
+
+    def set_paused(self, paused):
+        self._paused = paused
+
+    def wait_if_paused(self):
+        while self.paused:
+            if self.cancelled.wait(0.1):
+                raise RcloneError("Cancelled")
+
     def _estimate_total(self, api: GoogleDriveAPI) -> int:
         """Best-effort byte total for the whole transfer so the bar and ETA mean something."""
         try:
@@ -287,6 +208,7 @@ class ApiTransferWorker(QRunnable):
     def run(self):
         try:
             api = GoogleDriveAPI(self.rclone, self.remote)
+            api.wait_if_paused = self.wait_if_paused
             grand_total = self._estimate_total(api)
             started_at = time.monotonic()
             state = {"completed": 0, "files_done": 0, "current": None, "last_total": 0}
@@ -419,7 +341,7 @@ class FilePane(QFrame):
         top = QHBoxLayout()
         top.setSpacing(5)
         self.top_row = top
-        self.title = QLabel(("🖥  " if local else "☁  ") + title)
+        self.title = QLabel(title)
         self.title.setObjectName("panetab")
         top.addWidget(self.title)
         top.addStretch()
@@ -428,6 +350,7 @@ class FilePane(QFrame):
         addr = QFrame()
         addr.setObjectName("addressbar")
         arow = QHBoxLayout(addr)
+        self.address_row = arow
         arow.setContentsMargins(5, 3, 5, 3)
         arow.setSpacing(4)
         self.up = self._navbtn(icons.up_icon(), "Up one folder")
@@ -445,7 +368,7 @@ class FilePane(QFrame):
         layout.addWidget(addr)
         self.notice = QLabel("")
         self.notice.setWordWrap(True)
-        self.notice.setStyleSheet("color: #e6b566; background: #33291a; border: 1px solid #4a3a22; border-radius: 6px; padding: 7px 9px;")
+        self.notice.setStyleSheet("color: #786137; background: #faf5e9; border: none; border-radius: 8px; padding: 10px;")
         self.notice.hide()
         layout.addWidget(self.notice)
         self.table = FileTable("pc" if local else "cloud")
@@ -455,10 +378,12 @@ class FilePane(QFrame):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().hide()
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        self.table.setColumnWidth(2, 110)
         header.setMinimumSectionSize(56)
+        header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         header.setSectionsMovable(True)
         self.table.setColumnWidth(0, 320)
         self.table.setColumnWidth(1, 100)
@@ -466,10 +391,12 @@ class FilePane(QFrame):
         self.table.setAlternatingRowColors(True)
         self.table.setWordWrap(False)
         self.table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.table.setIconSize(QSize(20, 20))
         # Draggable row heights via the (hidden) vertical header.
         vheader = self.table.verticalHeader()
-        vheader.setDefaultSectionSize(30)
+        vheader.setDefaultSectionSize(38)
         vheader.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         if local:
             layout.addWidget(self.table, 1)
@@ -488,6 +415,13 @@ class FilePane(QFrame):
         self.count = QLabel("0 items")
         self.count.setObjectName("muted")
         layout.addWidget(self.count)
+        self.table.itemSelectionChanged.connect(self.selection_summary)
+
+    def selection_summary(self):
+        selected = self.selected()
+        total = sum(max(0, entry.size) for entry in selected if not entry.is_dir)
+        self.count.setText(f"{len(self.entries)} items" +
+                           (f" · {len(selected)} selected · {size_text(total)} in files" if selected else ""))
 
     @staticmethod
     def _navbtn(icon: QIcon, tip: str) -> QPushButton:
@@ -509,6 +443,7 @@ class FilePane(QFrame):
                       "" if group else entry.modified[:10]]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
+                item.setToolTip(entry.path if col == 0 else value)
                 if col == 0:
                     item.setIcon(icons.entry_icon(entry.path, entry.is_dir, local=self.local))
                 item.setData(Qt.ItemDataRole.UserRole, row)
@@ -559,6 +494,11 @@ class MainWindow(QMainWindow):
         self.mounts: dict[str, subprocess.Popen] = {}
         self.mount_rc_ports: dict[str, int] = {}
         self.mount_items = {}
+        self.mount_passwords = {}
+        self.mount_polling = set()
+        self.mount_logs = {}
+        self.folder_tree_visible = False
+        self.awake_requested = False
         self.transfer_opts = {
             "bwlimit": self.settings.value("opt/bwlimit", "") or "",
             "transfers": self.settings.value("opt/transfers", "") or "",
@@ -568,6 +508,9 @@ class MainWindow(QMainWindow):
         }
         self.closed = False
         self.local_request = 0
+        self.navigation = {"local": [], "cloud": []}
+        self.navigation_index = {"local": -1, "cloud": -1}
+        self.restoring_navigation = False
         self.build_ui()
         self.load_local()
         self.load_accounts()
@@ -626,9 +569,10 @@ class MainWindow(QMainWindow):
         tb.addStretch()
         self.search_edit = QLineEdit()
         self.search_edit.setObjectName("search")
-        self.search_edit.setPlaceholderText("🔍  Search current remote…")
+        self.search_edit.setPlaceholderText("Search current remote…")
         self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.setFixedWidth(250)
+        self.search_edit.setMinimumWidth(140)
+        self.search_edit.setMaximumWidth(320)
         self.search_edit.returnPressed.connect(self.run_search)
         tb.addWidget(self.search_edit)
         rootcol.addWidget(topbar)
@@ -646,12 +590,32 @@ class MainWindow(QMainWindow):
         ml.setContentsMargins(12, 10, 12, 8)
         ml.setSpacing(9)
         panes = QSplitter()
+        panes.setHandleWidth(12)
         self.pc = FilePane("This PC", local=True)
         self.cloud = FilePane("Google Drive", local=False)
+        for key, pane in (("local", self.pc), ("cloud", self.cloud)):
+            back = QPushButton("‹")
+            forward = QPushButton("›")
+            for button, name in ((back, "Back"), (forward, "Forward")):
+                button.setFixedWidth(32)
+                button.setToolTip(name)
+                button.setAccessibleName(name)
+            back.setEnabled(False)
+            forward.setEnabled(False)
+            back.clicked.connect(lambda _=False, k=key: self.navigate_history(k, -1))
+            forward.clicked.connect(lambda _=False, k=key: self.navigate_history(k, 1))
+            pane.address_row.insertWidget(0, back)
+            pane.address_row.insertWidget(1, forward)
+            pane.back_button, pane.forward_button = back, forward
         panes.addWidget(self.pc)
         panes.addWidget(self.cloud)
         panes.setSizes([520, 520])
-        ml.addWidget(panes, 1)
+        self.workspace_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.workspace_splitter.setChildrenCollapsible(False)
+        self.workspace_splitter.setHandleWidth(8)
+        self.workspace_splitter.addWidget(panes)
+        ml.addWidget(self.workspace_splitter, 1)
+        self.browser_panes = panes
 
         # Cloud pane tab: current account + Drive view switches live with the Drive pane.
         self.account_btn = QPushButton("Select account   ▼")
@@ -661,16 +625,32 @@ class MainWindow(QMainWindow):
         self.account_btn.clicked.connect(self.show_accounts_menu)
         self.view_drive = self._toolbtn("My Drive", checkable=True)
         self.view_shared = self._toolbtn("Shared", checkable=True)
-        self.open_shared_link = self._toolbtn("🔗")
+        self.open_shared_link = self._toolbtn("Open link")
         self.open_shared_link.setToolTip("Open a shared folder link")
         self.view_drive.clicked.connect(lambda: self.set_view(False))
         self.view_shared.clicked.connect(lambda: self.set_view(True))
         self.open_shared_link.clicked.connect(self.open_link)
         self.cloud.title.hide()
         self.cloud.top_row.insertWidget(0, self.account_btn)
-        self.cloud.top_row.insertWidget(1, self.view_drive)
-        self.cloud.top_row.insertWidget(2, self.view_shared)
-        self.cloud.top_row.insertWidget(3, self.open_shared_link)
+        cloud_views = QHBoxLayout()
+        cloud_views.setSpacing(4)
+        cloud_views.addWidget(self.view_drive)
+        cloud_views.addWidget(self.view_shared)
+        cloud_views.addWidget(self.open_shared_link)
+        folders_toggle = self._toolbtn("Folders", checkable=True)
+        def toggle_folders(checked):
+            self.folder_tree_visible = checked
+            self.update_buttons()
+        folders_toggle.toggled.connect(toggle_folders)
+        cloud_views.addWidget(folders_toggle)
+        cloud_views.addStretch()
+        self.cloud.layout().insertLayout(1, cloud_views)
+        local_actions = QHBoxLayout()
+        local_hint = QLabel("Local folders")
+        local_hint.setObjectName("muted")
+        local_hint.setMinimumHeight(34)
+        local_actions.addWidget(local_hint)
+        self.pc.layout().insertLayout(1, local_actions)
 
         self.pc.location.returnPressed.connect(self.local_address)
         self.pc.up.clicked.connect(self.local_up)
@@ -680,6 +660,12 @@ class MainWindow(QMainWindow):
         self.pc.table.filesDropped.connect(self.pc_drop)
         self.pc.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.pc.table.customContextMenuRequested.connect(lambda point: self.file_menu(self.pc, point))
+        upload_action = QPushButton("Upload selected")
+        upload_action.clicked.connect(lambda: self.start_transfer(True))
+        self.pc.top_row.addWidget(upload_action)
+        download_action = QPushButton("Download selected")
+        download_action.clicked.connect(lambda: self.start_transfer(False))
+        self.cloud.top_row.addWidget(download_action)
         self.cloud.up.clicked.connect(self.remote_up)
         self.cloud.refresh.clicked.connect(self.load_remote)
         self.cloud.table.cellDoubleClicked.connect(self.remote_open)
@@ -700,6 +686,11 @@ class MainWindow(QMainWindow):
         title = QLabel("Transfers")
         title.setObjectName("heading")
         transfer_heading.addWidget(title)
+        expand = QPushButton("Expand transfers")
+        expand.setCheckable(True)
+        expand.toggled.connect(lambda checked: (panes.setVisible(not checked),
+                               expand.setText("Show files" if checked else "Expand transfers")))
+        transfer_heading.addWidget(expand)
         transfer_heading.addStretch()
         self.transfer_summary = QLabel("No transfers yet")
         self.transfer_summary.setObjectName("muted")
@@ -717,24 +708,80 @@ class MainWindow(QMainWindow):
         self.transfers.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.transfers.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.transfers.setRootIsDecorated(True)
-        self.transfers.setUniformRowHeights(True)
+        self.transfers.setUniformRowHeights(False)
+        self.transfers.setWordWrap(True)
         self.transfers.setAlternatingRowColors(False)
         self.transfers.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.transfers.customContextMenuRequested.connect(self.transfer_menu)
         self.transfers.setIconSize(QSize(18, 18))
-        self.transfers.setMaximumHeight(232)
+        self.transfers.setMaximumHeight(16777215)
         self.transfers.setMinimumHeight(120)
         header = self.transfers.header()
+        header.setMinimumSectionSize(90)
+        header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         header.setStretchLastSection(False)
-        for column in (0, 3, 4, 6, 7, 8):
+        for column in (0, 4, 6, 8):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        for column in (3, 7):
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Interactive)
+            self.transfers.setColumnWidth(column, 180)
         for column in (1, 2):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
         self.transfers.setColumnWidth(5, 132)
+        self.transfers.setColumnHidden(0, True)
+        self.transfers.setColumnHidden(2, True)
+        self.transfers.setColumnHidden(7, True)
+        self.transfers.headerItem().setText(1, "File / folder")
+        self.transfers.setColumnWidth(3, 160)
+        self.transfers.itemDoubleClicked.connect(self.show_transfer_details)
         tp.addWidget(self.transfers)
-        ml.addWidget(transfer_panel)
-        rootcol.addWidget(main, 1)
+        self.workspace_splitter.addWidget(transfer_panel)
+        self.workspace_splitter.setSizes([490, 230])
+        content = QHBoxLayout()
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setSpacing(0)
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(190)
+        self.sync_btn.setText("Sync and backup")
+        self.options_btn.setText("Transfer settings")
+        nav = QVBoxLayout(sidebar)
+        nav.setContentsMargins(12, 20, 12, 12)
+        nav.setSpacing(10)
+        section = QLabel("WORKSPACE")
+        section.setObjectName("muted")
+        nav.addWidget(section)
+        files_button = QPushButton("Files")
+        files_button.setCheckable(True)
+        files_button.setChecked(True)
+        files_button.clicked.connect(lambda: expand.setChecked(False))
+        nav.addWidget(files_button)
+        transfers_button = QPushButton("Transfers")
+        transfers_button.setCheckable(True)
+        expand.toggled.connect(lambda checked: (files_button.setChecked(not checked), transfers_button.setChecked(checked)))
+        transfers_button.clicked.connect(lambda: expand.setChecked(True))
+        nav.addWidget(transfers_button)
+        for button in (self.accounts_btn, self.sync_btn, self.mount_btn, self.options_btn):
+            tb.removeWidget(button)
+            if button is not self.mount_btn or sys.platform == "win32":
+                nav.addWidget(button)
+        nav.addStretch()
+        self.keep_awake = QCheckBox("Keep laptop awake")
+        self.keep_awake.setToolTip("Prevents automatic sleep while app transfers or mounts are open. Lid-close settings still apply.")
+        self.keep_awake.setVisible(sys.platform == "win32")
+        self.keep_awake.toggled.connect(self.update_awake_state)
+        nav.addWidget(self.keep_awake)
+        tip = QLabel("Mounted uploads may continue after Explorer finishes copying.")
+        tip.setWordWrap(True)
+        tip.setObjectName("muted")
+        nav.addWidget(tip)
+        content.addWidget(sidebar)
+        content.addWidget(main, 1)
+        rootcol.addLayout(content, 1)
+        for separator in topbar.findChildren(QFrame):
+            if separator.objectName() == "toolsep":
+                separator.hide()
 
         # ----- bottom status bar -----
         statusbar = QFrame()
@@ -746,6 +793,8 @@ class MainWindow(QMainWindow):
         self.status_dot.setObjectName("statusdot")
         sb.addWidget(self.status_dot)
         self.status = QLabel("Ready")
+        self.status.setWordWrap(True)
+        self.status.setMinimumWidth(0)
         self.status.setObjectName("muted")
         sb.addWidget(self.status, 1)
         self.total_label = QLabel("")
@@ -770,6 +819,7 @@ class MainWindow(QMainWindow):
 
         self.transfer_timer = QTimer(self)
         self.transfer_timer.timeout.connect(self.refresh_transfer_times)
+        self.transfer_timer.timeout.connect(self.update_awake_state)
         self.transfer_timer.start(1000)
         self.mount_timer = QTimer(self)
         self.mount_timer.timeout.connect(self.refresh_mount_stats)
@@ -778,6 +828,19 @@ class MainWindow(QMainWindow):
 
     def set_status(self, message: str):
         self.status.setText(message)
+        self.status.setToolTip(message)
+
+    def update_awake_state(self):
+        if sys.platform != "win32":
+            return
+        import ctypes
+        wanted = self.keep_awake.isChecked() and bool(self.transfer_workers or self.mounts)
+        if wanted != self.awake_requested:
+            result = ctypes.windll.kernel32.SetThreadExecutionState(0x80000001 if wanted else 0x80000000)
+            if result:
+                self.awake_requested = wanted
+            else:
+                self.set_status("Windows could not enable keep-awake.")
 
     def _toolbtn(self, text: str, *, checkable: bool = False) -> QPushButton:
         button = QPushButton(text)
@@ -791,8 +854,8 @@ class MainWindow(QMainWindow):
     def _toolsep() -> QFrame:
         sep = QFrame()
         sep.setObjectName("toolsep")
-        sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setFixedWidth(1)
+        sep.setFrameShape(QFrame.Shape.NoFrame)
+        sep.setFixedWidth(8)
         return sep
 
     def toolbar_new_folder(self):
@@ -921,19 +984,47 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("Transfer options")
         form = QFormLayout(dialog)
-        form.addRow(QLabel("These apply to uploads, downloads and syncs on regular remotes."))
+        dialog.setMinimumWidth(520)
+        form.setSpacing(16)
+        note = QLabel("Limits apply to newly started regular transfers and syncs. Shared API uploads and mounted drives use separate settings.")
+        note.setWordWrap(True)
+        form.addRow(note)
         bwlimit = QLineEdit(self.transfer_opts["bwlimit"])
         bwlimit.setPlaceholderText("e.g. 10M, 500k, or blank for unlimited")
-        transfers = QLineEdit(str(self.transfer_opts["transfers"]))
-        transfers.setPlaceholderText("parallel files, e.g. 4")
-        checkers = QLineEdit(str(self.transfer_opts["checkers"]))
-        checkers.setPlaceholderText("parallel checks, e.g. 8")
+        limit_enabled = QCheckBox("Limit bandwidth")
+        limit_enabled.setChecked(bool(self.transfer_opts["bwlimit"]))
+        bwlimit.setEnabled(limit_enabled.isChecked())
+        bandwidth = QSlider(Qt.Orientation.Horizontal)
+        bandwidth.setRange(1, 200)
+        bandwidth.setToolTip("Set a limit from 1 to 200 MiB/s; enter other rclone rates in the field.")
+        current_rate = str(self.transfer_opts["bwlimit"])
+        bandwidth.setValue(int(current_rate[:-1]) if current_rate.endswith("M") and current_rate[:-1].isdigit() else 10)
+        bandwidth.setEnabled(limit_enabled.isChecked())
+        bandwidth.valueChanged.connect(lambda value: bwlimit.setText(f"{value}M"))
+        limit_enabled.toggled.connect(bwlimit.setEnabled)
+        limit_enabled.toggled.connect(bandwidth.setEnabled)
+        transfers = QSpinBox()
+        transfers.setRange(1, 16)
+        saved_transfers = str(self.transfer_opts["transfers"])
+        transfers.setValue(int(saved_transfers) if saved_transfers.isdigit() else 4)
+        concurrency = QSlider(Qt.Orientation.Horizontal)
+        concurrency.setRange(1, 16)
+        concurrency.setValue(transfers.value())
+        concurrency.valueChanged.connect(transfers.setValue)
+        transfers.valueChanged.connect(concurrency.setValue)
+        checkers = QSpinBox()
+        checkers.setRange(1, 32)
+        saved_checkers = str(self.transfer_opts["checkers"])
+        checkers.setValue(int(saved_checkers) if saved_checkers.isdigit() else 8)
         excludes = QLineEdit(self.transfer_opts["excludes"])
         excludes.setPlaceholderText("*.tmp, .DS_Store  (comma or newline separated)")
         includes = QLineEdit(self.transfer_opts["includes"])
         includes.setPlaceholderText("*.mp4, *.mov  (leave blank for everything)")
         form.addRow("Bandwidth limit", bwlimit)
+        form.addRow("", limit_enabled)
+        form.addRow("Limit (MiB/s)", bandwidth)
         form.addRow("Parallel transfers", transfers)
+        form.addRow("", concurrency)
         form.addRow("Parallel checkers", checkers)
         form.addRow("Exclude patterns", excludes)
         form.addRow("Include patterns", includes)
@@ -945,8 +1036,8 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         self.transfer_opts = {
-            "bwlimit": bwlimit.text().strip(), "transfers": transfers.text().strip(),
-            "checkers": checkers.text().strip(), "excludes": excludes.text().strip(),
+            "bwlimit": (bwlimit.text().strip() or f"{bandwidth.value()}M") if limit_enabled.isChecked() else "", "transfers": str(transfers.value()),
+            "checkers": str(checkers.value()), "excludes": excludes.text().strip(),
             "includes": includes.text().strip()}
         for key, value in self.transfer_opts.items():
             self.settings.setValue(f"opt/{key}", value)
@@ -1071,17 +1162,31 @@ class MainWindow(QMainWindow):
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             rc_port = probe.getsockname()[1]
-        args += ["--rc", "--rc-addr", f"127.0.0.1:{rc_port}", "--rc-no-auth"]
+        password = uuid.uuid4().hex
+        args += ["--rc", "--rc-addr", f"127.0.0.1:{rc_port}"]
+        mount_env = network_env()
+        mount_env.update(RCLONE_RC_USER="drivedesk", RCLONE_RC_PASS=password)
         try:
             proc = subprocess.Popen(
                 [self.rclone_path, *args], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                text=True, encoding="utf-8", errors="replace", env=network_env(),
+                text=True, encoding="utf-8", errors="replace", env=mount_env,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except OSError as exc:
             QMessageBox.warning(self, "Mount", str(exc))
             return
         self.mounts[drive] = proc
         self.mount_rc_ports[drive] = rc_port
+        self.mount_passwords[drive] = password
+        log = deque(maxlen=50)
+        self.mount_logs[drive] = log
+        def drain():
+            if proc.stderr:
+                for line in proc.stderr:
+                    log.append(line.rstrip())
+        Thread(target=drain, daemon=True).start()
+        item = QTreeWidgetItem(["Mount", drive, f"{remote}:{path}", "Connecting…", "", "", "", "", ""])
+        self.transfers.addTopLevelItem(item)
+        self.mount_items[drive] = item
         self.set_status(f"Mounting {remote}: on {drive}…")
         QTimer.singleShot(2800, lambda: self._check_mount(drive))
 
@@ -1092,7 +1197,7 @@ class MainWindow(QMainWindow):
         if proc.poll() is not None:
             error = ""
             try:
-                error = (proc.stderr.read() or "").strip() if proc.stderr else ""
+                error = "\n".join(self.mount_logs.get(drive, []))
             except OSError:
                 pass
             self.mounts.pop(drive, None)
@@ -1109,6 +1214,11 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(f"{drive}\\"))
 
     def unmount(self, drive: str):
+        if QMessageBox.question(self, "Unmount drive?",
+                "Unmounting interrupts transfers. Files still being written may not be uploaded. Continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
         proc = self.mounts.pop(drive, None)
         self.mount_rc_ports.pop(drive, None)
         item = self.mount_items.pop(drive, None)
@@ -1121,35 +1231,35 @@ class MainWindow(QMainWindow):
         self.set_status(f"Unmounted {drive}")
 
     def refresh_mount_stats(self):
-        """Poll each mounted rclone process and surface its VFS activity."""
+        """Poll outside the UI thread; unknown status must remain visible."""
         for drive, proc in list(self.mounts.items()):
             if proc.poll() is not None:
-                self.mount_rc_ports.pop(drive, None)
+                if drive in self.mount_items:
+                    self.mount_items[drive].setText(3, "Disconnected — uploads unverified")
                 continue
             port = self.mount_rc_ports.get(drive)
-            if not port:
+            if not port or drive in self.mount_polling:
                 continue
-            try:
-                with urllib.request.urlopen(
-                        f"http://127.0.0.1:{port}/core/stats?short=true", timeout=0.25) as response:
-                    stats = json.load(response)
-            except (OSError, ValueError):
-                continue
-            item = self.mount_items.get(drive)
-            if item is None:
-                item = QTreeWidgetItem(["Mount", f"{drive}:", self.account_display_name(),
-                                        "Mounted / idle", "", "", "—", "", ""])
-                for column in (1, 2, 4, 6, 7):
-                    item.setForeground(column, QColor("#73829a"))
-                self.transfers.addTopLevelItem(item)
-                self.mount_items[drive] = item
-            active = stats.get("transferring") or []
-            names = [str(entry.get("name", "")) for entry in active if entry.get("name")]
-            item.setText(3, f"Uploading · {len(names)} file(s)" if names else "Mounted / idle")
-            item.setText(4, f"{size_text(int(stats.get('bytes') or 0))} sent")
-            item.setText(6, speed_text(float(stats.get("speed") or 0)))
-            item.setText(7, ", ".join(names[:2]) + (" …" if len(names) > 2 else ""))
-        self.refresh_transfer_times()
+            self.mount_polling.add(drive)
+            password = self.mount_passwords[drive]
+            def done(value, d=drive):
+                self.mount_polling.discard(d)
+                item = self.mount_items.get(d)
+                if item is None:
+                    return
+                item.setText(3, value["state"])
+                item.setText(4, size_text(value["bytes"]) + " transferred")
+                item.setText(6, speed_text(value["speed"]))
+                item.setText(7, ", ".join(value["names"]))
+                item.setToolTip(7, "\n".join(value["names"]))
+            def failed(message, d=drive):
+                self.mount_polling.discard(d)
+                if d in self.mount_items:
+                    self.mount_items[d].setText(3, "Status unknown — keep app open")
+                    self.mount_items[d].setToolTip(3, message)
+                    self.mount_items[d].setText(6, "—")
+            self.run_async(lambda p=port, key=password: mount_snapshot(p, key), done,
+                           context="Mount monitor", on_error=failed)
 
     def show_rclone_version(self):
         if not self.rclone:
@@ -1349,7 +1459,17 @@ class MainWindow(QMainWindow):
         self.pool.start(worker)
 
     def closeEvent(self, event):
+        if self.transfer_workers or self.mounts:
+            answer = QMessageBox.question(self, "Transfers and mounted drives",
+                "Quitting stops transfers and unmounts drives. Pending uploads may not be finished. Quit anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
         self.closed = True
+        self.keep_awake.setChecked(False)
+        self.update_awake_state()
         for worker in list(self.transfer_workers):
             worker.cancel()
         for drive, proc in list(self.mounts.items()):
@@ -1613,7 +1733,7 @@ class MainWindow(QMainWindow):
         self.view_shared.setVisible(is_drive or not self.remote)
         self.open_shared_link.setVisible(is_drive or not self.remote)
         self.open_shared_link.setEnabled(bool(self.remote) and is_drive)
-        self.cloud.tree.setVisible(bool(self.remote) and is_drive)
+        self.cloud.tree.setVisible(bool(self.remote) and is_drive and self.folder_tree_visible)
         if self.remote:
             self.account_btn.setIcon(icons.backend_icon(self.remote_type))
             self.account_btn.setText(self._account_text(self.remote).strip() + "   ▼")
@@ -1621,7 +1741,42 @@ class MainWindow(QMainWindow):
             self.account_btn.setIcon(QIcon())
             self.account_btn.setText("Select account   ▼")
 
+    def record_navigation(self, key, location):
+        history = self.navigation[key]
+        index = self.navigation_index[key]
+        if not self.restoring_navigation and (index < 0 or history[index] != location):
+            del history[index + 1:]
+            history.append(location)
+            self.navigation_index[key] = len(history) - 1
+        pane = self.pc if key == "local" else self.cloud
+        index = self.navigation_index[key]
+        pane.back_button.setEnabled(index > 0)
+        pane.forward_button.setEnabled(index + 1 < len(history))
+
+    def navigate_history(self, key, delta):
+        index = self.navigation_index[key] + delta
+        history = self.navigation[key]
+        if not 0 <= index < len(history):
+            return
+        self.navigation_index[key] = index
+        self.restoring_navigation = True
+        try:
+            if key == "local":
+                self.local_path = Path(history[index])
+                self.load_local()
+            else:
+                (self.remote, self.remote_path, self.shared, self.link_folder_id,
+                 self.link_resource_key, self.shared_folder_id, self.shared_folder_key,
+                 self.owner_filter, folders) = history[index]
+                self.folder_history = list(folders)
+                self.remote_type = self.remote_types.get(self.remote, "")
+                self.load_remote()
+                self.update_buttons()
+        finally:
+            self.restoring_navigation = False
+
     def load_local(self):
+        self.record_navigation("local", str(self.local_path))
         self.pc.location.setText(str(self.local_path))
         self.pc.show_entries([])
         self.local_request += 1
@@ -1658,6 +1813,9 @@ class MainWindow(QMainWindow):
             self.load_local()
 
     def load_remote(self):
+        self.record_navigation("cloud", (self.remote, self.remote_path, self.shared,
+            self.link_folder_id, self.link_resource_key, self.shared_folder_id,
+            self.shared_folder_key, self.owner_filter, list(self.folder_history)))
         self.update_buttons()
         if not self.remote or not self.rclone:
             return
@@ -2291,14 +2449,38 @@ class MainWindow(QMainWindow):
         cancel = QPushButton("Cancel")
         cancel.setObjectName("tinycancel")
         cancel.clicked.connect(worker.cancel)
-        self.transfers.setItemWidget(item, 8, cancel)
+        controls = QWidget()
+        buttons = QHBoxLayout(controls)
+        buttons.setContentsMargins(2, 2, 2, 2)
+        pause = QPushButton("Pause")
+        pause.setToolTip("Pause this session. Long pauses can expire server connections.")
+        pause.clicked.connect(lambda: self.toggle_transfer_pause(worker))
+        buttons.addWidget(pause)
+        buttons.addWidget(cancel)
+        self.transfers.setItemWidget(item, 8, controls)
         self.transfer_items[worker] = {
-            "item": item, "bar": bar, "cancel": cancel, "start": time.monotonic(),
+            "item": item, "bar": bar, "cancel": cancel, "pause": pause, "start": time.monotonic(),
             "is_dir": is_dir, "children": {}, "eta": "—", "speed": "—", "name": label,
             "upload": upload, "done": 0, "total": max(0, total), "speed_bps": 0.0}
         worker.signals.progress.connect(lambda event, w=worker: self.transfer_progress(w, event))
         worker.signals.done.connect(lambda ok, msg, w=worker, name=label: self.transfer_done(w, name, ok, msg))
         self.pool.start(worker)
+
+    def toggle_transfer_pause(self, worker):
+        state = self.transfer_items.get(worker)
+        if not state:
+            return
+        try:
+            worker.set_paused(not worker.paused)
+        except (OSError, psutil.Error) as exc:
+            self.set_status(f"Cannot pause transfer: {exc}")
+            return
+        state["pause"].setText("Resume" if worker.paused else "Pause")
+        state["item"].setText(3, "Pausing after current chunk" if worker.paused and isinstance(worker, ApiTransferWorker)
+                              else "Paused" if worker.paused else "Resuming")
+        if worker.paused:
+            state["speed_bps"] = 0
+            state["item"].setText(6, "—")
 
     def _extra_transfer_flags(self) -> list[str]:
         flags: list[str] = []
@@ -2401,11 +2583,19 @@ class MainWindow(QMainWindow):
             child["item"].setText(7, eta_text(file.get("eta")))
         self.refresh_transfer_times()
 
+        if getattr(worker, "paused", False):
+            item.setText(3, "Paused / finishing current chunk")
+            item.setText(6, "—")
+            state["speed_bps"] = 0
+
     def transfer_done(self, worker, label: str, ok: bool, message: str):
         state = self.transfer_items.pop(worker, None)
         if state:
+            if state.get("pause"):
+                state["pause"].setEnabled(False)
             item = state["item"]
-            item.setText(3, "Complete" if ok else message[:80])
+            item.setText(3, "Complete" if ok else message)
+            item.setToolTip(3, message)
             bar = state["bar"]
             bar.setRange(0, 100)
             if ok:
@@ -2481,7 +2671,29 @@ class MainWindow(QMainWindow):
         for worker in list(self.transfer_workers):
             worker.cancel()
 
+    def show_transfer_details(self, item, _column):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Transfer details")
+        dialog.resize(600, 440)
+        layout = QFormLayout(dialog)
+        layout.setSpacing(14)
+        for column, title in ((0, "Operation"), (1, "Source"), (2, "Destination"),
+                              (3, "Status"), (4, "Size"), (6, "Speed"), (7, "Details / time")):
+            label = QLabel(item.text(column))
+            label.setWordWrap(True)
+            label.setMinimumWidth(0)
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            layout.addRow(title, label)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+        dialog.exec()
+
     def _remove_transfer_item(self, item):
+        if any(item is mount for mount in self.mount_items.values()):
+            self.set_status("Unmount the drive to remove its monitor.")
+            return
         index = self.transfers.indexOfTopLevelItem(item)
         if index >= 0:
             self.transfers.takeTopLevelItem(index)

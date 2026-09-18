@@ -1,6 +1,7 @@
 import os
 import time
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -268,7 +269,8 @@ class SharedViewTests(unittest.TestCase):
             window.transfer_done(workers[0], "Uploading A.txt", True, "Complete")
             window.clear_finished_transfers()
             self.assertEqual(window.transfers.topLevelItemCount(), 1)
-            window.close()
+            with patch.object(app.QMessageBox, "question", return_value=app.QMessageBox.StandardButton.Yes):
+                window.close()
         finally:
             app.find_rclone, app.Rclone, app.TransferWorker = real_find, real_rclone, real_worker
 
