@@ -357,11 +357,14 @@ class GoogleDriveAPI:
             session = response.headers["Location"]
         started = time.monotonic()
         sent = 0
+        # Larger resumable chunks reduce per-request TLS/HTTP overhead and make
+        # sustained uploads much closer to the throughput of dedicated clients.
+        upload_chunk_size = 64 * 1024 * 1024
         with local_path.open("rb") as source:
             while sent < size or (size == 0 and sent == 0):
                 if cancelled.is_set():
                     raise RcloneError("Cancelled")
-                chunk = source.read(8 * 1024 * 1024)
+                chunk = source.read(upload_chunk_size)
                 end = sent + len(chunk) - 1
                 with self._open(session, method="PUT", data=chunk,
                                 headers={"Content-Type": mime,
