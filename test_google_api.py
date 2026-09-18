@@ -97,6 +97,62 @@ class GoogleApiTests(unittest.TestCase):
         self.assertEqual(calls[1][1]["headers"]["Content-Range"], "bytes 0-4/5")
         self.assertEqual(progress, [(5, 5)])
 
+    def test_upload_timeout_queries_offset_before_resending(self):
+        api = self.api()
+        api.list_files = lambda **kwargs: []
+        calls = []
+        class Response:
+            def __init__(self, status, headers):
+                self.status, self.headers = status, headers
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+        replies = [Response(200, {"Location": "https://upload.example/session"}),
+                   TimeoutError("read timed out"), Response(308, {"Range": "bytes=0-1"}),
+                   Response(200, {})]
+        def opened(url, **kwargs):
+            calls.append(kwargs)
+            reply = replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+        api._open = opened
+        class Cancellation:
+            def is_set(self): return False
+            def wait(self, seconds): return False
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "clip.mov"
+            source.write_bytes(b"hello")
+            api.upload(source, "parent", replace=False, cancelled=Cancellation(), progress=lambda *args: None)
+        self.assertEqual(calls[2]["data"], b"")
+        self.assertEqual(calls[2]["headers"]["Content-Range"], "bytes */5")
+        self.assertEqual(calls[3]["headers"]["Content-Range"], "bytes 2-4/5")
+        self.assertEqual(calls[3]["data"], b"llo")
+
+    def test_upload_lost_final_response_does_not_duplicate_file(self):
+        api = self.api()
+        api.list_files = lambda **kwargs: []
+        calls = []
+        class Response:
+            status = 200
+            headers = {"Location": "https://upload.example/session"}
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+        def opened(url, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 2:
+                raise TimeoutError("lost response")
+            return Response()
+        api._open = opened
+        class Cancellation:
+            def is_set(self): return False
+            def wait(self, seconds): return False
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "clip.mov"
+            source.write_bytes(b"hello")
+            api.upload(source, "parent", replace=False, cancelled=Cancellation(), progress=lambda *args: None)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[2]["data"], b"")
+
 
 if __name__ == "__main__":
     unittest.main()

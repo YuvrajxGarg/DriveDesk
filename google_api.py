@@ -9,6 +9,7 @@ import json
 import hashlib
 import mimetypes
 import os
+import re
 import socket
 import time
 from datetime import datetime, timezone
@@ -133,7 +134,7 @@ class GoogleDriveAPI:
 
     def _open(self, url: str, *, method: str = "GET", data: bytes | None = None,
               headers: dict[str, str] | None = None, resource_id: str = "", resource_key: str = "",
-              allow_incomplete: bool = False):
+              allow_incomplete: bool = False, timeout: int = 30):
         additional = dict(headers or {})
         if resource_id and resource_key:
             additional["X-Goog-Drive-Resource-Keys"] = f"{resource_id}/{resource_key}"
@@ -149,7 +150,7 @@ class GoogleDriveAPI:
                     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
                 else:
                     opener = urllib.request.build_opener()
-                return opener.open(request, timeout=30)
+                return opener.open(request, timeout=timeout)
             except urllib.error.HTTPError as exc:
                 if exc.code == 308 and allow_incomplete:
                     return exc
@@ -361,24 +362,61 @@ class GoogleDriveAPI:
             session = response.headers["Location"]
         started = time.monotonic()
         sent = 0
+        failures = 0
+        probing = False
         # Larger resumable chunks reduce per-request TLS/HTTP overhead and make
         # sustained uploads much closer to the throughput of dedicated clients.
         upload_chunk_size = 64 * 1024 * 1024
         with local_path.open("rb") as source:
-            while sent < size or (size == 0 and sent == 0):
+            while True:
                 self.wait_if_paused()
                 if cancelled.is_set():
                     raise RcloneError("Cancelled")
-                chunk = source.read(upload_chunk_size)
+                source.seek(sent)
+                chunk = b"" if probing or sent == size else source.read(upload_chunk_size)
+                if not chunk and sent < size and not probing:
+                    raise RcloneError("Local file changed during upload")
                 end = sent + len(chunk) - 1
-                with self._open(session, method="PUT", data=chunk,
-                                headers={"Content-Type": mime,
-                                         "Content-Range": f"bytes {sent}-{end}/{size}" if size else "bytes */0"},
-                                allow_incomplete=True) as response:
-                    status = response.status if hasattr(response, "status") else response.code
-                sent += len(chunk)
-                progress(sent, size, started)
-                if status in (200, 201):
-                    break
-                if size == 0:
-                    raise RcloneError("Empty upload did not complete")
+                try:
+                    with self._open(session, method="PUT", data=chunk,
+                                    headers={"Content-Type": mime,
+                                             "Content-Range": f"bytes {sent}-{end}/{size}" if chunk else f"bytes */{size}"},
+                                    allow_incomplete=True, timeout=180) as response:
+                        status = response.status if hasattr(response, "status") else response.code
+                        received = response.headers.get("Range", "")
+                    if status in (200, 201):
+                        progress(size, size, started)
+                        return
+                    if status != 308:
+                        raise RcloneError(f"Unexpected upload status: {status}")
+                    matched = re.fullmatch(r"bytes=0-(\d+)", received) if received else None
+                    if received and not matched:
+                        raise RcloneError("Invalid Google upload acknowledgement")
+                    offset = int(matched.group(1)) + 1 if matched else 0
+                    if not 0 <= offset <= size:
+                        raise RcloneError("Google upload acknowledgement exceeds file size")
+                    if offset <= sent:
+                        failures += 1
+                        if failures > 6:
+                            raise RcloneError("Upload stalled: Google has not acknowledged more data")
+                        if cancelled.wait(min(2 ** failures, 30)):
+                            raise RcloneError("Cancelled")
+                    else:
+                        failures = 0
+                    sent = offset
+                    probing = sent == size
+                    progress(sent, size, started)
+                except (RcloneError, OSError) as exc:
+                    cause = exc.__cause__ or exc
+                    code = getattr(cause, "code", None)
+                    retryable = (isinstance(cause, OSError) and not isinstance(cause, urllib.error.HTTPError)
+                                 or code in (408, 429, 500, 502, 503, 504)
+                                 or "rateLimitExceeded" in str(exc))
+                    if not retryable or failures >= 6:
+                        raise
+                    failures += 1
+                    if cancelled.wait(min(2 ** failures, 30)):
+                        raise RcloneError("Cancelled")
+                    # The failed request may have succeeded remotely. Query before
+                    # sending any more data, including after a failed status query.
+                    probing = True

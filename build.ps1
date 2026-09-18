@@ -1,10 +1,10 @@
 param(
     [switch]$Installer,
-    [string]$Version = "1.0.3"
+    [string]$Version = "1.1.0"
 )
 
 $ErrorActionPreference = "Stop"
-$projectRoot = Split-Path -Parent $PSScriptRoot
+$projectRoot = $PSScriptRoot
 Set-Location $projectRoot
 
 if (-not (Test-Path "third_party\rclone.exe")) {

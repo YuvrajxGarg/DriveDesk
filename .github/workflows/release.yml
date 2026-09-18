@@ -18,10 +18,10 @@ jobs:
           - os: windows-latest
             platform: windows
             rclone_url: https://downloads.rclone.org/rclone-current-windows-amd64.zip
-          - os: macos-13
+          - os: macos-15-intel
             platform: macos-x64
             rclone_url: https://downloads.rclone.org/rclone-current-osx-amd64.zip
-          - os: macos-14
+          - os: macos-15
             platform: macos-arm64
             rclone_url: https://downloads.rclone.org/rclone-current-osx-arm64.zip
     runs-on: ${{ matrix.os }}
@@ -36,6 +36,10 @@ jobs:
 
       - name: Install Python dependencies
         run: python -m pip install -r requirements.txt pyinstaller
+
+      - name: Run regression tests
+        if: matrix.platform == 'windows'
+        run: python -m unittest -q
 
       - name: Download rclone
         shell: bash
@@ -78,8 +82,29 @@ jobs:
           mkdir -p dist/installer
           hdiutil create -volname DriveDesk -srcfolder dist/DriveDesk.app -ov -format UDZO "dist/installer/DriveDesk-Setup-${version}-${{ matrix.platform }}.dmg"
 
-      - name: Publish GitHub release
+      - name: Collect installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.platform }}
+          path: dist/installer/*
+          if-no-files-found: error
+
+  publish:
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installer-*
+          path: installers
+          merge-multiple: true
+      - name: Publish complete release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: dist/installer/*
+          fail_on_unmatched_files: true
+          files: |
+            installers/*.exe
+            installers/*macos-x64.dmg
+            installers/*macos-arm64.dmg
