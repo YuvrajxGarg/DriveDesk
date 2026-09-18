@@ -2169,7 +2169,10 @@ class MainWindow(QMainWindow):
             return
         destination_remote = remote_folder if remote_folder is not None else self.remote_path
         destination_local = local_folder if local_folder is not None else self.local_path
-        use_api = self.shared or bool(self.link_folder_id)
+        # Keep the direct API path for uploads, where it is needed for shared
+        # folder permissions. Downloads are faster and more resilient through
+        # rclone, which can run parallel transfers and resume transient failures.
+        use_api = (self.shared or bool(self.link_folder_id)) and upload
         parent_id, parent_key = self.shared_folder_id, self.shared_folder_key
         if use_api and upload and destination_remote != self.remote_path:
             target = next((item for item in self.cloud.entries if item.path == destination_remote and item.is_dir), None)
@@ -2195,7 +2198,9 @@ class MainWindow(QMainWindow):
                                            local_folder=destination_local, replace=replace)
             else:
                 args = transfer_args(entry, self.remote, destination_remote, destination_local,
-                                     upload=upload, shared=False, replace=replace)
+                                     upload=upload, shared=self.shared, replace=replace,
+                                     folder_id=self.link_folder_id,
+                                     resource_key=self.link_resource_key)
                 args += self._extra_transfer_flags()
                 worker = TransferWorker(self.rclone_path, args)
             label = f"{'Uploading' if upload else 'Downloading'} {entry.name}"
