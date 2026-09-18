@@ -40,7 +40,7 @@ class FakeRclone:
 
 
 class FakeGoogleAPI:
-    def __init__(self, _rclone, _remote):
+    def __init__(self, _rclone, _remote, *, use_preferred=True, auth=None):
         pass
 
     def account_label(self):
@@ -52,6 +52,11 @@ class FakeGoogleAPI:
         if on_page:
             on_page(entries, "")
         return entries
+
+    def list_my_drive(self, path="", *, known_folder_id=""):
+        if path:
+            return [Entry("Document.pdf", f"{path}/Document.pdf", False, 123, id="file-1")]
+        return [Entry("Projects", "Projects", True, id="folder-1")]
 
 
 class SharedViewTests(unittest.TestCase):
@@ -68,6 +73,32 @@ class SharedViewTests(unittest.TestCase):
     def tearDown(self):
         QThreadPool.globalInstance().waitForDone(2000)
         self.qt.processEvents()
+
+    def test_my_drive_uses_native_listing_and_remembers_folder_id(self):
+        real_find, real_rclone = app.find_rclone, app.Rclone
+        app.find_rclone = lambda _saved="": "fake-rclone"
+        app.Rclone = FakeRclone
+        try:
+            window = app.MainWindow()
+            window.remote = "test-drive"
+            window.remote_type = "drive"
+            window.shared = False
+            window.load_remote()
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and not window.cloud.entries:
+                self.qt.processEvents()
+                time.sleep(0.01)
+            self.assertEqual(window.cloud.entries[0].name, "Projects")
+            window.remote_open(0, 0)
+            self.assertEqual(window.drive_folder_ids[("test-drive", "Projects")], "folder-1")
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and not window.cloud.entries:
+                self.qt.processEvents()
+                time.sleep(0.01)
+            self.assertEqual(window.cloud.entries[0].name, "Document.pdf")
+            window.close()
+        finally:
+            app.find_rclone, app.Rclone = real_find, real_rclone
 
     def test_shared_items_from_api_are_browsable_by_owner(self):
         real_find, real_rclone = app.find_rclone, app.Rclone
@@ -328,9 +359,13 @@ class SharedViewTests(unittest.TestCase):
         FakeRclone.names = ["test-drive"]
         try:
             window = app.MainWindow()
+            connected = []
+            window.native_auth.connect = lambda _cancelled: connected.append({
+                "id": "native:test", "name": "Alex", "email": "new@example.com", "client_id": "test-client"}) or "native:test"
+            window.native_auth.accounts = lambda: list(connected)
             window.add_google_account()
             deadline = time.monotonic() + 3
-            while time.monotonic() < deadline and len(FakeRclone.names) < 2:
+            while time.monotonic() < deadline and not connected:
                 self.qt.processEvents()
                 time.sleep(0.01)
             def has_label():
@@ -341,8 +376,7 @@ class SharedViewTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertEqual(window.accounts.count(), 2)
             self.assertTrue(has_label())
-            for remote in FakeRclone.names[1:]:
-                window.settings.remove(f"account_label/{remote}")
+            window.settings.remove("account_label/native:test")
             window.close()
         finally:
             app.find_rclone, app.Rclone, app.QSettings = real_find, real_rclone, real_settings

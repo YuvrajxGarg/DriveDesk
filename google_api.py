@@ -22,6 +22,7 @@ from threading import Event, Lock
 from PyQt6.QtCore import QSettings
 
 from drive_backend import Entry, Rclone, RcloneError, network_env
+from google_auth import NativeGoogleAuth
 
 
 FOLDER = "application/vnd.google-apps.folder"
@@ -32,7 +33,7 @@ EXPORTS = {
     "application/vnd.google-apps.presentation": ("application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx"),
     "application/vnd.google-apps.drawing": ("image/svg+xml", ".svg"),
 }
-FIELDS = "nextPageToken,files(id,name,mimeType,size,modifiedTime,resourceKey,owners(emailAddress,displayName),sharingUser(emailAddress,displayName),shortcutDetails(targetId,targetMimeType,targetResourceKey),capabilities(canDownload,canAddChildren))"
+FIELDS = "nextPageToken,files(id,name,mimeType,size,md5Checksum,modifiedTime,resourceKey,owners(emailAddress,displayName),sharingUser(emailAddress,displayName),shortcutDetails(targetId,targetMimeType,targetResourceKey),capabilities(canDownload,canAddChildren))"
 
 
 class GoogleDriveAPI:
@@ -43,12 +44,18 @@ class GoogleDriveAPI:
     _preferred: dict[str, str] = {}
     _preference_lock = Lock()
 
-    def __init__(self, rclone: Rclone, remote: str, *, use_preferred: bool = True):
+    def __init__(self, rclone: Rclone | None, remote: str, *, use_preferred: bool = True,
+                 auth: NativeGoogleAuth | None = None):
         self.rclone = rclone
         self.remote = remote
+        self.auth = auth
         self.token = ""
-        self._load_token()
-        if use_preferred:
+        self.root_folder_id = "root"
+        if auth is not None:
+            self.token = auth.access_token(remote)
+        else:
+            self._load_token()
+        if use_preferred and auth is None:
             with self._preference_lock:
                 self._choose_custom_client()
 
@@ -112,7 +119,9 @@ class GoogleDriveAPI:
 
     def _load_token(self):
         config = json.loads(self.rclone.run("config", "dump", timeout=15))
-        token = config[self.remote].get("token", "")
+        remote_config = config[self.remote]
+        self.root_folder_id = remote_config.get("root_folder_id") or "root"
+        token = remote_config.get("token", "")
         data = json.loads(token) if isinstance(token, str) else token
         self.token = data["access_token"]
         expiry = data.get("expiry", "")
@@ -122,6 +131,9 @@ class GoogleDriveAPI:
                 self._refresh_token()
 
     def _refresh_token(self):
+        if self.auth is not None:
+            self.token = self.auth.access_token(self.remote, force=True)
+            return
         self.rclone.run("about", f"{self.remote}:", timeout=30)
         config = json.loads(self.rclone.run("config", "dump", timeout=15))
         token = config[self.remote].get("token", "")
@@ -175,6 +187,7 @@ class GoogleDriveAPI:
         if not name or "/" in name or "\\" in name or name in (".", ".."):
             return None
         mime = row.get("mimeType", "")
+        is_shortcut = mime == SHORTCUT
         item_id, resource_key = row.get("id", ""), row.get("resourceKey", "")
         if mime == SHORTCUT:
             target = row.get("shortcutDetails") or {}
@@ -184,8 +197,9 @@ class GoogleDriveAPI:
         person = row.get("sharingUser") or (row.get("owners") or [{}])[0]
         owner = person.get("displayName") or person.get("emailAddress") or "Unknown owner"
         return Entry(name, f"{prefix}/{name}".lstrip("/"), mime == FOLDER,
-                     int(row.get("size") or -1), row.get("modifiedTime", ""), owner,
-                     item_id, resource_key, mime)
+                     int(row["size"]) if row.get("size") is not None else -1,
+                     row.get("modifiedTime", ""), owner,
+                     item_id, resource_key, mime, row.get("md5Checksum", ""), is_shortcut)
 
     def list_files(self, *, folder_id: str = "", resource_key: str = "", prefix: str = "",
                    page_token: str = "", on_page=None) -> list[Entry]:
@@ -217,11 +231,36 @@ class GoogleDriveAPI:
                 break
         return sorted(entries, key=lambda e: (e.owner.casefold() if not folder_id else "", not e.is_dir, e.name.casefold()))
 
+    def list_my_drive(self, path: str = "", *, known_folder_id: str = "") -> list[Entry]:
+        """Browse a configured Drive root through file IDs, without rclone lsjson."""
+        folder_id = self.resolve_my_drive_folder_id(path, known_folder_id=known_folder_id)
+        return self.list_files(folder_id=folder_id, prefix=path)
+
+    def resolve_my_drive_folder_id(self, path: str = "", *, known_folder_id: str = "") -> str:
+        if known_folder_id:
+            return known_folder_id
+        folder_id = self.root_folder_id
+        prefix = ""
+        for component in filter(None, path.strip("/").split("/")):
+            children = self.list_files(folder_id=folder_id, prefix=prefix)
+            matches = [item for item in children if item.is_dir and item.name == component]
+            if len(matches) != 1:
+                reason = "ambiguous" if matches else "not found"
+                raise RcloneError(f"Drive folder {component!r} is {reason}; refresh its parent folder.")
+            folder_id = matches[0].id
+            prefix = matches[0].path
+        return folder_id
+
     def folder_name(self, folder_id: str, resource_key: str = "") -> str:
         url = (f"https://www.googleapis.com/drive/v3/files/{urllib.parse.quote(folder_id)}"
                "?fields=name&supportsAllDrives=true")
         data = self._json(url, resource_id=folder_id, resource_key=resource_key)
         return data.get("name", "") or "Shared folder"
+
+    def file_metadata(self, entry: Entry) -> dict:
+        url = (f"https://www.googleapis.com/drive/v3/files/{urllib.parse.quote(entry.id)}?" +
+               urllib.parse.urlencode({"fields": "id,size,md5Checksum,modifiedTime,trashed", "supportsAllDrives": "true"}))
+        return self._json(url, resource_id=entry.id, resource_key=entry.resource_key)
 
     def create_folder(self, name: str, parent_id: str, parent_key: str = "") -> str:
         if not parent_id:
@@ -253,6 +292,13 @@ class GoogleDriveAPI:
         url = f"https://www.googleapis.com/drive/v3/files/{urllib.parse.quote(entry.id)}"
         with self._open(url, method="DELETE", resource_id=entry.id, resource_key=entry.resource_key):
             pass
+
+    def trash(self, entry: Entry):
+        """Move a Drive item to Google's Trash so sync deletions are recoverable."""
+        url = f"https://www.googleapis.com/drive/v3/files/{urllib.parse.quote(entry.id)}?fields=id,trashed"
+        self._json(url, method="PATCH", data=b'{"trashed":true}',
+                   headers={"Content-Type": "application/json; charset=utf-8"},
+                   resource_id=entry.id, resource_key=entry.resource_key)
 
     def download(self, entry: Entry, local_path: Path, *, replace: bool, cancelled: Event,
                  progress) -> None:

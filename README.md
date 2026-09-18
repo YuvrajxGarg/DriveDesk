@@ -1,59 +1,41 @@
 # DriveDesk
 
-A cross-platform desktop file browser for Google Drive remotes already configured in rclone. It provides side-by-side local and Drive browsing, uploads, downloads, and a **Shared with me** view grouped by file owner.
+A desktop file manager with side-by-side local and cloud browsing. Google Drive is the first native provider: Google sign-in, My Drive and Shared with me browsing, file operations, transfers, and previewable folder sync use Google's API directly. Other configured cloud providers and Windows Mount remain available through optional legacy rclone support. This is not an Air Explorer clone or a measured speed improvement; transfer speed still depends on Google, the network, and the files involved.
 
-## Run
+## Install and sign in
+
+Install the Windows installer or macOS DMG from the [Releases page](https://github.com/YuvrajxGarg/DriveDesk/releases), or run from source:
 
 ```powershell
 python -m pip install -r requirements.txt
 python app.py
 ```
 
-On Windows, you can also double-click **Launch DriveDesk.bat**. A packaged executable can be built with:
+Choose **Add Google account**. DriveDesk opens Google's consent page in your browser and receives the response on a temporary local loopback port. It requests offline Drive access so it can refresh your session. Refresh tokens are stored in the operating system's credential store through `keyring`, not in the app settings. The Desktop OAuth client ID can be changed under **Tools → Google sign-in settings**. A client secret is not required or stored.
+
+Google's broad Drive scope is classified as restricted. The OAuth consent screen and test-user or verification configuration for the supplied client ID must be correctly set up in Google Cloud before sign-in will work for other people. Existing rclone accounts are still listed separately; the new native Google account is not an automatic migration of an old rclone remote.
+
+Browse **My Drive** or **Shared with me** in the cloud pane. Shared entries are grouped by owner where Google provides owner metadata. Double-click folders to navigate. Drag files between panes or use the context menu for upload, download, rename, delete, and new folder. A transfer copies by default; it does not remove the source. Google-native deletions use Drive Trash. You can paste a Google Drive folder link using **Open shared link** if your account has access.
+
+## Native Google folder sync
+
+Select a Google account and browse to the destination folder, then open **Sync and backup**. The app compares local and cloud trees and shows a preview before making changes. Available modes are copy/update, mirror, move, and two-way update. Mirror and move can delete from the source or destination; Google items go to Drive Trash and local items go to the OS recycle bin/trash. Review the preview carefully, especially for large or shared folders. Include/exclude filters are in **Tools → Sync filters**.
+
+Google-native documents and shortcuts cannot yet be transferred by folder sync. They are skipped in copy/update and two-way mode; mirror and move refuse to run when these items are present. Duplicate case-insensitive names and ambiguous two-way conflicts also stop the sync. Two-way update does not propagate deletions. This is not a continuous background sync service.
+
+## Legacy providers and Mount
+
+For existing non-native accounts or Mount, install or select `rclone` via the legacy Tools menu. Mount on Windows also needs WinFsp. The Windows installer and macOS DMG still bundle rclone to preserve those features, but a native Google account does not require rclone for browsing, transfers, or sync.
+
+## Build
 
 ```powershell
-python -m pip install pyinstaller
+python -m pip install -r requirements.txt pyinstaller
+python -m unittest discover -q
 python -m PyInstaller --noconfirm --clean DriveDesk.spec
+dist\DriveDesk.exe --smoke-test
 ```
 
-The executable will be in `dist/DriveDesk.exe`. Build from the spec file so PyInstaller excludes incompatible ICU DLLs that other software may place on `PATH`.
+The Windows executable is `dist/DriveDesk.exe`. To make the Windows installer, put the Windows rclone binary at `third_party/rclone.exe`, install Inno Setup, and run `./build.ps1 -Installer`. Inno Setup writes to `dist/installer`. The release workflow builds installers on version tags; local builds are not published automatically.
 
-To build the Windows installer, place the Windows `rclone.exe` binary at
-`third_party/rclone.exe`, install Inno Setup, then run:
-
-```powershell
-./build.ps1 -Installer
-```
-
-The installer will be written to `dist/installer`. Releases are built and
-published automatically by `.github/workflows/release.yml` whenever a `v*` tag
-is pushed (for example, `git tag v1.0.1; git push origin v1.0.1`). DriveDesk's
-**Tools → Check for updates…** menu checks the latest GitHub Release, downloads
-the installer asset, and offers to restart into it.
-
-macOS releases are published as native `.dmg` installers for both Intel and
-Apple Silicon Macs. Open the matching DMG, drag DriveDesk to Applications, and
-launch it normally. The macOS build includes the rclone executable and does
-not require Python or a terminal. Mounting a remote as a drive letter remains
-Windows-only; browsing, transfers, synchronization, accounts, and updates are
-available on macOS.
-
-DriveDesk looks for `rclone` on PATH and in common install folders, including Downloads. If it cannot find it, choose the executable from the app.
-
-The app reads your existing rclone configuration; it does not store or display OAuth tokens. Choose **Add Google account** to open Google's sign-in page in your browser. Select the account there; DriveDesk completes rclone configuration in the background without opening a command prompt. Google may require a separate OAuth client ID if rclone's shared client has been retired.
-
-Drag files or folders from the PC pane to the Drive pane to upload, or from Drive to PC to download. Drop onto a folder row to copy into that folder. You can also drag local files from Windows Explorer onto the Drive pane. These actions copy files; they do not remove the originals.
-
-The Transfers table shows each copy's source, destination, transferred size, progress, current speed, ETA, and elapsed time. Use **Cancel** on a running row to stop that transfer. ETA and percentage appear once rclone has reported enough information to calculate them.
-
-Right-click a file or folder for Open, Calculate size, Properties, Upload or Download, Rename, Delete, and New folder. Drive items with a known ID can also open in your browser. Changes inside shared folders require edit access; Google Drive will report a permission error if the account cannot make them. Folder size calculations recurse through contents and can take time on large folders.
-
-Transfers skip files that already exist at the destination by default. Enable **Replace existing** to update them. The app does not delete source or destination files.
-
-The owner groups in **Shared with me** are built from rclone's Google Drive `owner` metadata on items at the shared root. Some items may appear under **Unknown owner** when Google does not provide owner metadata. A shared folder's contents are browsable inside its owner group.
-
-The Drive pane has a navigation tree with **My Drive** and **Shared with me**. Shared items come from the paginated Google Drive API, are grouped by the person who shared them, and shared folders expand on demand. Pages appear as they load; if Google's request quota is reached, the loaded people remain visible and DriveDesk retries later. Shared files and folders use the same API for downloads, uploads into editable folders, and size calculation. If no shared items are returned at all, check that you selected the same Google account that shows them in Drive. The tree reflects items accessible now; it cannot list people whose past shares were removed or revoked.
-
-The account sidebar shows each Google account's display name and email, with its rclone ID in the tooltip. When two configured remotes are verified as the same Google account, DriveDesk can use an existing custom OAuth client for shared operations to avoid the default shared client's request quota.
-
-For a specific shared folder, choose **Open shared link** and paste a `https://drive.google.com/drive/folders/...` URL. DriveDesk uses the folder ID and optional `resourcekey` from the link for browsing, downloading, and uploading with the selected account. Uploading requires edit access to the linked folder. Select files or folders in the PC pane, then choose **Upload to linked folder**.
+On macOS, use the platform DMG from Releases, drag DriveDesk into Applications, and launch it normally. Mount is Windows-only. For a source build on macOS, use the macOS spec and a macOS Python environment.

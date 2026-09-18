@@ -28,6 +28,8 @@ from PyQt6.QtWidgets import (
 import icons
 from drive_backend import BACKENDS, OAUTH_BACKENDS, SYNC_COMMANDS, Entry, Rclone, RcloneError, find_rclone, local_entries, mount_args, network_env, parse_drive_folder_url, sync_args, transfer_args, transfer_event
 from google_api import GoogleDriveAPI
+from google_auth import GoogleAuthError, NativeGoogleAuth
+from google_sync import SyncPlan, plan_sync, execute_sync
 from updater import APP_VERSION, GITHUB_REPO, check_for_update, download_update
 
 
@@ -159,13 +161,15 @@ class TransferWorker(QRunnable):
 
 
 class ApiTransferWorker(QRunnable):
-    def __init__(self, rclone: Rclone, remote: str, entry: Entry, *, upload: bool,
-                 parent_id: str, parent_key: str, local_folder: Path, replace: bool):
+    def __init__(self, rclone: Rclone | None, remote: str, entry: Entry, *, upload: bool,
+                 parent_id: str, parent_key: str, local_folder: Path, replace: bool,
+                 auth: NativeGoogleAuth | None = None, use_preferred: bool = True):
         super().__init__()
         self.setAutoDelete(False)
         self.rclone, self.remote, self.entry = rclone, remote, entry
         self.upload, self.parent_id, self.parent_key = upload, parent_id, parent_key
         self.local_folder, self.replace = local_folder, replace
+        self.auth, self.use_preferred = auth, use_preferred
         self.cancelled = Event()
         self.signals = TransferSignals()
 
@@ -207,7 +211,8 @@ class ApiTransferWorker(QRunnable):
 
     def run(self):
         try:
-            api = GoogleDriveAPI(self.rclone, self.remote)
+            api = (GoogleDriveAPI(self.rclone, self.remote, auth=self.auth) if self.auth else
+                   GoogleDriveAPI(self.rclone, self.remote, use_preferred=self.use_preferred))
             api.wait_if_paused = self.wait_if_paused
             grand_total = self._estimate_total(api)
             started_at = time.monotonic()
@@ -236,11 +241,48 @@ class ApiTransferWorker(QRunnable):
                     "transferring": [],
                 })
             if self.upload:
-                api.upload(Path(self.entry.path), self.parent_id, parent_key=self.parent_key,
+                api.upload(Path(self.entry.path), self.parent_id or api.root_folder_id, parent_key=self.parent_key,
                            replace=self.replace, cancelled=self.cancelled, progress=progress)
             else:
                 api.download(self.entry, self.local_folder / self.entry.name,
                              replace=self.replace, cancelled=self.cancelled, progress=progress)
+            self.signals.done.emit(True, "Complete")
+        except Exception as exc:
+            self.signals.done.emit(False, "Cancelled" if self.cancelled.is_set() else str(exc))
+
+
+class NativeSyncWorker(QRunnable):
+    def __init__(self, auth: NativeGoogleAuth, remote: str, local_root: Path, plan: SyncPlan):
+        super().__init__()
+        self.setAutoDelete(False)
+        self.auth, self.remote, self.local_root, self.plan = auth, remote, local_root, plan
+        self.cancelled = Event()
+        self.signals = TransferSignals()
+        self._paused = False
+
+    @property
+    def paused(self):
+        return self._paused
+
+    def set_paused(self, paused):
+        self._paused = paused
+
+    def wait_if_paused(self):
+        while self.paused:
+            if self.cancelled.wait(0.1):
+                raise RcloneError("Cancelled")
+
+    def cancel(self):
+        self.cancelled.set()
+
+    def run(self):
+        try:
+            api = GoogleDriveAPI(None, self.remote, auth=self.auth)
+            api.wait_if_paused = self.wait_if_paused
+            execute_sync(api, self.local_root, self.plan, self.cancelled,
+                         lambda index, total, action: self.signals.progress.emit({
+                             "kind": "sync_step", "index": index, "total": total,
+                             "action": action.kind, "path": action.path}))
             self.signals.done.emit(True, "Complete")
         except Exception as exc:
             self.signals.done.emit(False, "Cancelled" if self.cancelled.is_set() else str(exc))
@@ -336,8 +378,8 @@ class FilePane(QFrame):
         self.entries: list[Entry] = []
         self.local = local
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 9)
-        layout.setSpacing(7)
+        layout.setContentsMargins(18, 16, 18, 12)
+        layout.setSpacing(10)
         top = QHBoxLayout()
         top.setSpacing(5)
         self.top_row = top
@@ -396,7 +438,7 @@ class FilePane(QFrame):
         self.table.setIconSize(QSize(20, 20))
         # Draggable row heights via the (hidden) vertical header.
         vheader = self.table.verticalHeader()
-        vheader.setDefaultSectionSize(38)
+        vheader.setDefaultSectionSize(42)
         vheader.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         if local:
             layout.addWidget(self.table, 1)
@@ -467,6 +509,7 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(icons.app_logo())
         self.resize(1380, 820)
         self.settings = QSettings("DriveDesk", "DriveDesk")
+        self.native_auth = NativeGoogleAuth()
         self.rclone_path = find_rclone(self.settings.value("rclone_path", ""))
         self.rclone = Rclone(self.rclone_path) if self.rclone_path else None
         self.pool = QThreadPool.globalInstance()
@@ -474,6 +517,7 @@ class MainWindow(QMainWindow):
         self.remote_type = ""
         self.remote_types: dict[str, str] = {}
         self.remote_path = ""
+        self.drive_folder_ids: dict[tuple[str, str], str] = {}
         self.shared = False
         self.link_folder_id = ""
         self.link_resource_key = ""
@@ -515,6 +559,16 @@ class MainWindow(QMainWindow):
         self.load_local()
         self.load_accounts()
 
+    @staticmethod
+    def is_native_google(remote: str) -> bool:
+        return remote.startswith("native:")
+
+    def google_api(self, remote: str | None = None, *, use_preferred: bool = True) -> GoogleDriveAPI:
+        remote = remote or self.remote
+        if self.is_native_google(remote):
+            return GoogleDriveAPI(None, remote, auth=self.native_auth)
+        return GoogleDriveAPI(self.rclone, remote, use_preferred=use_preferred)
+
     def build_ui(self):
         root = QWidget()
         self.setCentralWidget(root)
@@ -526,7 +580,7 @@ class MainWindow(QMainWindow):
         topbar = QFrame()
         topbar.setObjectName("topbar")
         tb = QHBoxLayout(topbar)
-        tb.setContentsMargins(16, 8, 16, 8)
+        tb.setContentsMargins(20, 11, 20, 11)
         tb.setSpacing(3)
         brand = QFrame()
         brand.setObjectName("brandmark")
@@ -587,8 +641,8 @@ class MainWindow(QMainWindow):
 
         main = QWidget()
         ml = QVBoxLayout(main)
-        ml.setContentsMargins(12, 10, 12, 8)
-        ml.setSpacing(9)
+        ml.setContentsMargins(18, 18, 18, 14)
+        ml.setSpacing(14)
         panes = QSplitter()
         panes.setHandleWidth(12)
         self.pc = FilePane("This PC", local=True)
@@ -661,9 +715,13 @@ class MainWindow(QMainWindow):
         self.pc.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.pc.table.customContextMenuRequested.connect(lambda point: self.file_menu(self.pc, point))
         upload_action = QPushButton("Upload selected")
+        upload_action.setObjectName("primary")
+        upload_action.setToolTip("Copy selected files from this computer to the open cloud folder")
         upload_action.clicked.connect(lambda: self.start_transfer(True))
         self.pc.top_row.addWidget(upload_action)
         download_action = QPushButton("Download selected")
+        download_action.setObjectName("secondaryAction")
+        download_action.setToolTip("Copy selected cloud files into the open computer folder")
         download_action.clicked.connect(lambda: self.start_transfer(False))
         self.cloud.top_row.addWidget(download_action)
         self.cloud.up.clicked.connect(self.remote_up)
@@ -680,8 +738,8 @@ class MainWindow(QMainWindow):
         transfer_panel = QFrame()
         transfer_panel.setObjectName("panel")
         tp = QVBoxLayout(transfer_panel)
-        tp.setContentsMargins(12, 10, 12, 10)
-        tp.setSpacing(7)
+        tp.setContentsMargins(18, 14, 18, 12)
+        tp.setSpacing(10)
         transfer_heading = QHBoxLayout()
         title = QLabel("Transfers")
         title.setObjectName("heading")
@@ -743,14 +801,14 @@ class MainWindow(QMainWindow):
         content.setSpacing(0)
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(190)
+        sidebar.setFixedWidth(208)
         self.sync_btn.setText("Sync and backup")
         self.options_btn.setText("Transfer settings")
         nav = QVBoxLayout(sidebar)
-        nav.setContentsMargins(12, 20, 12, 12)
-        nav.setSpacing(10)
+        nav.setContentsMargins(14, 22, 14, 14)
+        nav.setSpacing(8)
         section = QLabel("WORKSPACE")
-        section.setObjectName("muted")
+        section.setObjectName("sectionLabel")
         nav.addWidget(section)
         files_button = QPushButton("Files")
         files_button.setCheckable(True)
@@ -869,9 +927,10 @@ class MainWindow(QMainWindow):
 
     def show_tools_menu(self):
         menu = QMenu(self)
-        menu.addAction("Transfer options…", self.transfer_options_dialog)
+        menu.addAction("Sync filters…" if self.is_native_google(self.remote) else "Transfer options…",
+                       self.transfer_options_dialog)
         menu.addAction("Synchronize folders…", self.sync_dialog)
-        if sys.platform == "win32":
+        if sys.platform == "win32" and not self.is_native_google(self.remote):
             menu.addAction("Mount remote as drive…", self.mount_dialog)
         if self.mounts:
             submenu = menu.addMenu("Unmount drive")
@@ -879,9 +938,11 @@ class MainWindow(QMainWindow):
                 submenu.addAction(drive, lambda _=False, letter=drive: self.unmount(letter))
         menu.addSeparator()
         menu.addAction("Refresh accounts", self.load_accounts)
-        menu.addAction("Choose rclone executable…", self.choose_rclone)
-        menu.addAction("rclone version", self.show_rclone_version)
-        menu.addAction("Show rclone config location", self.show_config_location)
+        menu.addAction("Google sign-in settings…", self.edit_google_client_id)
+        legacy = menu.addMenu("Legacy providers")
+        legacy.addAction("Choose rclone executable…", self.choose_rclone)
+        legacy.addAction("rclone version", self.show_rclone_version)
+        legacy.addAction("Show rclone config location", self.show_config_location)
         menu.addSeparator()
         menu.addAction("Check for updates…", self.check_for_updates)
         menu.exec(self.tools_btn.mapToGlobal(self.tools_btn.rect().bottomLeft()))
@@ -954,7 +1015,7 @@ class MainWindow(QMainWindow):
         if not term:
             self.load_remote()
             return
-        if not self.rclone or not self.remote:
+        if not self.remote or (not self.rclone and not self.is_native_google(self.remote)):
             self.set_status("Select a remote to search.")
             return
         if self.shared or self.link_folder_id:
@@ -976,11 +1037,37 @@ class MainWindow(QMainWindow):
                 return
             self.cloud.show_notice(f"Search failed: {message}")
             self.set_status(f"Search: {message}")
-        self.run_async(lambda: self.rclone.search_files(remote, path, term), done,
+        operation = (lambda: [entry for entry in self.google_api(remote, use_preferred=False).list_my_drive(
+            path, known_folder_id=self.drive_folder_ids.get((remote, path), ""))
+            if term.casefold() in entry.name.casefold()]) if self.is_native_google(remote) else (
+                lambda: self.rclone.search_files(remote, path, term))
+        self.run_async(operation, done,
                        context="Search", on_error=failed)
 
     # ---- Transfer options ----
     def transfer_options_dialog(self):
+        if self.is_native_google(self.remote):
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Google Drive sync filters")
+            form = QFormLayout(dialog)
+            form.addRow(QLabel("These patterns apply to native folder sync. Manual transfers use the selected files."))
+            excludes = QLineEdit(self.transfer_opts["excludes"])
+            excludes.setPlaceholderText("*.tmp, .DS_Store")
+            includes = QLineEdit(self.transfer_opts["includes"])
+            includes.setPlaceholderText("Leave blank for all files")
+            form.addRow("Exclude", excludes)
+            form.addRow("Include", includes)
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            form.addRow(buttons)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                for key, edit in (("excludes", excludes), ("includes", includes)):
+                    value = edit.text().strip()
+                    self.transfer_opts[key] = value
+                    self.settings.setValue(f"opt/{key}", value)
+                self.set_status("Google Drive sync filters saved")
+            return
         dialog = QDialog(self)
         dialog.setWindowTitle("Transfer options")
         form = QFormLayout(dialog)
@@ -1045,7 +1132,8 @@ class MainWindow(QMainWindow):
 
     # ---- Synchronize ----
     def sync_dialog(self):
-        if not self.rclone or not self.remote:
+        native = self.is_native_google(self.remote)
+        if not self.remote or (not self.rclone and not native):
             self.set_status("Select a remote before synchronizing.")
             return
         if self.shared or self.link_folder_id:
@@ -1055,15 +1143,18 @@ class MainWindow(QMainWindow):
         dialog.setWindowTitle("Synchronize folders")
         form = QFormLayout(dialog)
         pc_edit = QLineEdit(str(self.local_path))
-        cloud_edit = QLineEdit(f"{self.remote}:{self.remote_path}")
+        cloud_edit = QLineEdit(self.remote_path if native else f"{self.remote}:{self.remote_path}")
+        if native:
+            cloud_edit.setReadOnly(True)
+            cloud_edit.setToolTip("Browse to the Google Drive folder before opening Sync and backup.")
         direction = QComboBox()
         direction.addItems([f"PC  →  {self.account_display_name()}",
                             f"{self.account_display_name()}  →  PC"])
         mode = QComboBox()
-        mode.addItems(["Mirror (make destination identical — deletes extra files)",
+        mode.addItems(["Mirror (make destination identical — moves extras to Trash)",
                        "Copy (add new/changed, never delete)",
-                       "Move (copy then remove from source)",
-                       "Two-way sync (bisync, resync baseline)"])
+                       "Move (copy then move source to Trash)",
+                       "Two-way update (no deletion)" if native else "Two-way sync (bisync, resync baseline)"])
         dry_run = QCheckBox("Dry run first (preview changes, transfer nothing)")
         dry_run.setChecked(True)
         form.addRow("PC folder", pc_edit)
@@ -1081,12 +1172,16 @@ class MainWindow(QMainWindow):
             return
         pc_side = pc_edit.text().strip()
         cloud_side = cloud_edit.text().strip()
-        if not pc_side or not cloud_side:
+        if not pc_side or (not cloud_side and not native):
             self.set_status("Both a PC folder and a cloud folder are required.")
             return
         modes = ["mirror", "copy", "move", "bisync"]
         chosen = modes[mode.currentIndex()]
         to_cloud = direction.currentIndex() == 0
+        if native:
+            self.start_native_sync(Path(pc_side), cloud_side, to_cloud=to_cloud,
+                                   mode=chosen, dry_run=dry_run.isChecked())
+            return
         source, dest = (pc_side, cloud_side) if to_cloud else (cloud_side, pc_side)
         try:
             args = sync_args(source, dest, chosen, dry_run=dry_run.isChecked(),
@@ -1103,6 +1198,68 @@ class MainWindow(QMainWindow):
         self.refresh_transfer_times()
         self.set_status(f"Started {operation.lower()} sync…")
 
+    def start_native_sync(self, local_root: Path, cloud_path: str, *, to_cloud: bool,
+                          mode: str, dry_run: bool):
+        remote = self.remote
+        known_id = self.drive_folder_ids.get((remote, cloud_path), "")
+        cancelled = Event()
+        progress = QProgressDialog("Comparing local and Google Drive folders…", "Cancel", 0, 0, self)
+        progress.setWindowTitle("Sync preview")
+        progress.setMinimumDuration(0)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.canceled.connect(cancelled.set)
+        progress.show()
+
+        def build_plan():
+            api = self.google_api(remote, use_preferred=False)
+            folder_id = api.resolve_my_drive_folder_id(cloud_path, known_folder_id=known_id)
+            options = self.transfer_opts
+            excludes = tuple(part.strip() for part in str(options.get("excludes", "")).replace(",", "\n").splitlines() if part.strip())
+            includes = tuple(part.strip() for part in str(options.get("includes", "")).replace(",", "\n").splitlines() if part.strip())
+            return plan_sync(api, local_root, folder_id, to_cloud=to_cloud, mode=mode,
+                             excludes=excludes, includes=includes, cancelled=cancelled)
+
+        def ready(plan: SyncPlan):
+            progress.close()
+            if cancelled.is_set():
+                return
+            counts = {kind: sum(action.kind == kind for action in plan.actions)
+                      for kind in ("upload", "download", "mkdir_cloud", "trash_cloud", "trash_local")}
+            summary = (f"{counts['upload']} upload(s), {counts['download']} download(s), "
+                       f"{counts['mkdir_cloud']} new cloud folder(s), "
+                       f"{counts['trash_cloud'] + counts['trash_local']} item(s) moved to Trash.")
+            if plan.skipped:
+                summary += f"\n\n{len(plan.skipped)} Google document(s) or shortcut(s) skipped."
+            if plan.actions:
+                sample = "\n".join(f"  {action.kind.replace('_', ' ')}: {action.path}" for action in plan.actions[:12])
+                summary += f"\n\nFirst changes:\n{sample}"
+                if len(plan.actions) > 12:
+                    summary += f"\n  …and {len(plan.actions) - 12} more"
+            if dry_run or not plan.actions:
+                QMessageBox.information(self, "Sync preview", summary if plan.actions else "These folders are already in sync.")
+                self.set_status("Sync preview complete; no files changed.")
+                return
+            answer = QMessageBox.question(self, "Apply sync changes?", summary + "\n\nApply these changes?",
+                                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                          QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                self.set_status("Sync cancelled after preview.")
+                return
+            worker = NativeSyncWorker(self.native_auth, remote, local_root, plan)
+            source = str(local_root) if to_cloud else f"{self._account_text(remote)}:/{cloud_path}"
+            destination = f"{self._account_text(remote)}:/{cloud_path}" if to_cloud else str(local_root)
+            label = f"{mode.title()} {source} → {destination}"
+            self._add_transfer_row(worker, operation=mode.title(), upload=to_cloud,
+                                   source=source, destination=destination, is_dir=True,
+                                   total=-1, label=label)
+            self.set_status(f"Started native Google Drive {mode} sync…")
+
+        def failed(message):
+            progress.close()
+            if not cancelled.is_set():
+                QMessageBox.warning(self, "Could not compare folders", message)
+        self.run_async(build_plan, ready, context="Sync preview", on_error=failed)
+
     # ---- Mount ----
     def _free_drive_letters(self) -> list[str]:
         used = {f"{chr(letter)}:" for letter in range(ord('A'), ord('Z') + 1)
@@ -1112,7 +1269,7 @@ class MainWindow(QMainWindow):
                 if f"{chr(letter)}:" not in used]
 
     def mount_dialog(self):
-        if not self.rclone or not self.remote:
+        if not self.rclone or not self.remote or self.is_native_google(self.remote):
             self.set_status("Select a remote before mounting.")
             return
         letters = self._free_drive_letters()
@@ -1278,7 +1435,14 @@ class MainWindow(QMainWindow):
                        context="rclone config")
 
     def _account_text(self, remote: str) -> str:
-        return str(self.settings.value(f"account_label/{remote}", remote))
+        saved = self.settings.value(f"account_label/{remote}", "")
+        if saved:
+            return str(saved)
+        if self.is_native_google(remote):
+            account = next((item for item in self.native_auth.accounts() if item["id"] == remote), None)
+            if account:
+                return f"{account['name']} ({account['email']})" if account["email"] else account["name"]
+        return remote
 
     def show_accounts_menu(self):
         self.accounts_menu.exec(self.account_btn.mapToGlobal(self.account_btn.rect().bottomLeft()))
@@ -1295,9 +1459,9 @@ class MainWindow(QMainWindow):
             action.setCheckable(True)
             action.setChecked(remote == self.remote)
         menu.addSeparator()
-        menu.addAction("＋  Add Google account", self.add_google_account)
-        menu.addAction("＋  Add other cloud…", self.add_remote)
-        menu.addAction("⚙  Manage accounts…", self.account_manager_dialog)
+        menu.addAction("Add Google account", self.add_google_account)
+        menu.addAction("Add other cloud…", self.add_remote)
+        menu.addAction("Manage accounts…", self.account_manager_dialog)
 
     def account_manager_dialog(self):
         dialog = QDialog(self)
@@ -1305,7 +1469,7 @@ class MainWindow(QMainWindow):
         dialog.setMinimumWidth(440)
         layout = QVBoxLayout(dialog)
         layout.setSpacing(9)
-        layout.addWidget(QLabel("Connected remotes"))
+        layout.addWidget(QLabel("Connected accounts"))
         listw = QListWidget()
         for index in range(self.accounts.count()):
             source = self.accounts.item(index)
@@ -1322,10 +1486,10 @@ class MainWindow(QMainWindow):
             return item.data(Qt.ItemDataRole.UserRole) if item else None
 
         add_row = QHBoxLayout()
-        add_google = QPushButton("＋  Add Google account")
+        add_google = QPushButton("Add Google account")
         add_google.setObjectName("primary")
         add_google.clicked.connect(lambda: (dialog.accept(), self.add_google_account()))
-        add_other = QPushButton("＋  Add other cloud…")
+        add_other = QPushButton("Add other cloud…")
         add_other.clicked.connect(lambda: (dialog.accept(), self.add_remote()))
         add_row.addWidget(add_google)
         add_row.addWidget(add_other)
@@ -1355,7 +1519,7 @@ class MainWindow(QMainWindow):
         status = QLabel(self.binary_label.text() or "rclone not selected")
         status.setObjectName("muted")
         footer.addWidget(status, 1)
-        set_binary = QPushButton("Set rclone executable…")
+        set_binary = QPushButton("Legacy provider setup…")
         set_binary.clicked.connect(lambda: (dialog.accept(), self.choose_rclone()))
         footer.addWidget(set_binary)
         close = QPushButton("Close")
@@ -1382,7 +1546,7 @@ class MainWindow(QMainWindow):
         self.set_status(f"Renamed account to {name}")
 
     def reconnect_account(self, remote: str):
-        if not self.rclone:
+        if not self.is_native_google(remote) and not self.rclone:
             return
         cancelled = Event()
         progress = QProgressDialog("Re-authorize this account in the browser window that opens.",
@@ -1403,14 +1567,16 @@ class MainWindow(QMainWindow):
             self.set_status(message)
             if not cancelled.is_set():
                 QMessageBox.warning(self, "Could not reconnect", message)
-        self.run_async(lambda: self.rclone.reconnect_drive(remote, cancelled), done,
+        operation = (lambda: self.native_auth.connect(cancelled, expected_remote=remote)) if self.is_native_google(remote) else (
+            lambda: self.rclone.reconnect_drive(remote, cancelled))
+        self.run_async(operation, done,
                        context="Reconnect", on_error=failed)
 
     def remove_account(self, remote: str):
         label = self.settings.value(f"account_label/{remote}", remote)
         answer = QMessageBox.question(
             self, "Remove account",
-            f"Remove '{label}' from rclone?\n\nThis deletes the saved connection on this PC. "
+            f"Remove '{label}' from DriveDesk?\n\nThis deletes the saved connection on this PC. "
             "Your Google Drive files are not affected, and you can add the account again later.")
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -1422,10 +1588,12 @@ class MainWindow(QMainWindow):
                 self.cloud.show_entries([])
             self.set_status(f"Removed {label}")
             self.load_accounts()
-        self.run_async(lambda: self.rclone.delete_remote(remote), done, context="Remove account")
+        operation = (lambda: self.native_auth.remove(remote)) if self.is_native_google(remote) else (
+            lambda: self.rclone.delete_remote(remote))
+        self.run_async(operation, done, context="Remove account")
 
     def account_display_name(self) -> str:
-        return str(self.settings.value(f"account_label/{self.remote}", self.remote) or "Google Drive")
+        return self._account_text(self.remote) if self.remote else "Google Drive"
 
     def run_async(self, fn, success, *, context: str, on_error=None):
         worker = Worker(fn)
@@ -1487,11 +1655,20 @@ class MainWindow(QMainWindow):
             self.settings.setValue("rclone_path", filename)
             self.load_accounts()
 
-    def add_google_account(self):
-        if not self.rclone_path:
-            self.choose_rclone()
+    def edit_google_client_id(self):
+        value, accepted = QInputDialog.getText(
+            self, "Google sign-in settings", "Desktop OAuth client ID:",
+            text=self.native_auth.client_id())
+        if not accepted:
             return
-        name = "gdrive_" + uuid.uuid4().hex[:8]
+        try:
+            self.native_auth.set_client_id(value)
+        except GoogleAuthError as exc:
+            QMessageBox.warning(self, "Invalid client ID", str(exc))
+            return
+        self.set_status("Google sign-in client ID saved for new connections.")
+
+    def add_google_account(self):
         cancelled = Event()
         progress = QProgressDialog("Choose your Google account in the browser window, then allow Drive access.",
                                    "Cancel", 0, 0, self)
@@ -1502,13 +1679,12 @@ class MainWindow(QMainWindow):
         progress.show()
         self.set_status("Waiting for Google sign-in in your browser…")
         def connect_account():
-            self.rclone.create_drive(name, cancelled)
-            return name
+            return self.native_auth.connect(cancelled)
         def done(remote):
             progress.close()
-            # Let load_accounts resolve the real "Name (email)" via the Drive API,
-            # instead of locking in an id-based fallback that blocks resolution.
-            self.settings.remove(f"account_label/{remote}")
+            account = next(item for item in self.native_auth.accounts() if item["id"] == remote)
+            label = f"{account['name']} ({account['email']})" if account["email"] else account["name"]
+            self.settings.setValue(f"account_label/{remote}", label)
             self.remote = ""
             self.remote_path = ""
             self.set_view(False)
@@ -1600,10 +1776,7 @@ class MainWindow(QMainWindow):
     def load_accounts(self, preferred: str | None = None):
         if not isinstance(preferred, str):
             preferred = None
-        self.binary_label.setText(f"rclone: {Path(self.rclone_path).name}" if self.rclone_path else "rclone not found")
-        if not self.rclone:
-            self.set_status("Select rclone.exe to connect your configured accounts.")
-            return
+        self.binary_label.setText(f"Legacy provider: {Path(self.rclone_path).name}" if self.rclone_path else "Native Google Drive ready")
         self.set_status("Loading accounts…")
         previous = preferred or self.remote
         def done(pairs):
@@ -1612,7 +1785,7 @@ class MainWindow(QMainWindow):
             self.accounts.blockSignals(True)
             self.accounts.clear()
             for name, kind in pairs:
-                label = str(self.settings.value(f"account_label/{name}", name))
+                label = self._account_text(name)
                 item = QListWidgetItem(icons.backend_icon(kind), self._account_text(name))
                 item.setData(Qt.ItemDataRole.UserRole, name)
                 item.setToolTip(f"{name}  ·  {BACKENDS.get(kind, {}).get('label', kind or 'remote')}")
@@ -1636,7 +1809,7 @@ class MainWindow(QMainWindow):
                             apply_label(value, remote_name)
                         else:
                             apply_label(f"Google Drive ({remote_name[-4:]})", remote_name)
-                    self.run_async(lambda remote_name=name: GoogleDriveAPI(self.rclone, remote_name).account_label(),
+                    self.run_async(lambda remote_name=name: self.google_api(remote_name).account_label(),
                                    label_done, context="Account name",
                                    on_error=lambda _m, remote_name=name: apply_label(
                                        f"Google Drive ({remote_name[-4:]})", remote_name))
@@ -1653,7 +1826,11 @@ class MainWindow(QMainWindow):
                 self.set_status("No remotes yet. Open Accounts to connect Google Drive or another cloud.")
             self.rebuild_accounts_menu()
             self.update_buttons()
-        self.run_async(self.rclone.remotes, done, context="Accounts")
+        def available_accounts():
+            native = [(item["id"], "drive") for item in self.native_auth.accounts()]
+            legacy = self.rclone.remotes() if self.rclone else []
+            return native + legacy
+        self.run_async(available_accounts, done, context="Accounts")
 
     def account_selected(self, current, _previous):
         if current is None:
@@ -1718,12 +1895,17 @@ class MainWindow(QMainWindow):
         # Remember this link under "Opened links" in the Drive tree.
         remote = self.remote
         self._add_saved_link(remote, folder_id, resource_key, "Shared folder")
-        self.run_async(lambda: GoogleDriveAPI(self.rclone, remote).folder_name(folder_id, resource_key),
+        self.run_async(lambda: self.google_api(remote).folder_name(folder_id, resource_key),
                        lambda name: self._add_saved_link(remote, folder_id, resource_key, name),
                        context="Link name", on_error=lambda _message: None)
 
     def update_buttons(self):
         is_drive = self.remote_type == "drive"
+        native = self.is_native_google(self.remote)
+        self.mount_btn.setVisible(sys.platform == "win32" and not native)
+        self.mount_btn.setEnabled(bool(self.rclone) and bool(self.remote) and not native)
+        self.options_btn.setText("Sync filters" if native else "Transfer settings")
+        self.search_edit.setPlaceholderText("Search this folder…" if native else "Search current remote…")
         on_drive_view = not self.shared and not self.link_folder_id
         self.view_drive.setChecked(is_drive and on_drive_view)
         self.view_shared.setChecked(is_drive and self.shared and not self.link_folder_id)
@@ -1817,7 +1999,7 @@ class MainWindow(QMainWindow):
             self.link_folder_id, self.link_resource_key, self.shared_folder_id,
             self.shared_folder_key, self.owner_filter, list(self.folder_history)))
         self.update_buttons()
-        if not self.remote or not self.rclone:
+        if not self.remote or (not self.rclone and not self.is_native_google(self.remote)):
             return
         self.remote_request += 1
         request = self.remote_request
@@ -1870,9 +2052,14 @@ class MainWindow(QMainWindow):
         elif shared or folder_id:
             current_id = self.shared_folder_id if path or folder_id else ""
             current_key = self.shared_folder_key if current_id else ""
-            self.run_async(lambda: GoogleDriveAPI(self.rclone, remote).list_files(
+            self.run_async(lambda: self.google_api(remote).list_files(
                 folder_id=current_id, resource_key=current_key, prefix=path),
                 done, context="Drive", on_error=failed)
+        elif self.remote_type == "drive":
+            known_id = self.drive_folder_ids.get((remote, path), "")
+            self.run_async(lambda: self.google_api(remote, use_preferred=False).list_my_drive(
+                path, known_folder_id=known_id),
+                           done, context="Drive", on_error=failed)
         else:
             self.run_async(lambda: self.rclone.list(remote, path), done, context="Drive", on_error=failed)
 
@@ -2002,7 +2189,7 @@ class MainWindow(QMainWindow):
                 if "quota" in message.lower():
                     QTimer.singleShot(65000, lambda: self.load_shared_sidebar(remote) if not self.closed else None)
         self.run_async_progress(
-            lambda emit: GoogleDriveAPI(self.rclone, remote).list_files(
+            lambda emit: self.google_api(remote).list_files(
                 page_token=start_token, on_page=lambda batch, token: emit((batch, token))),
             page, done, context="Shared sidebar", on_error=failed)
 
@@ -2082,7 +2269,7 @@ class MainWindow(QMainWindow):
             item.takeChildren()
             item.addChild(QTreeWidgetItem([f"Unavailable: {message[:80]}"]))
             item.setData(0, Qt.ItemDataRole.UserRole + 1, False)
-        self.run_async(lambda: GoogleDriveAPI(self.rclone, remote).list_files(
+        self.run_async(lambda: self.google_api(remote).list_files(
             folder_id=folder_id, resource_key=key, prefix=path), done,
                        context="Shared folders", on_error=failed)
 
@@ -2138,6 +2325,8 @@ class MainWindow(QMainWindow):
                                             self.shared_folder_key, self.owner_filter))
                 self.shared_folder_id = entry.id
                 self.shared_folder_key = entry.resource_key
+            elif self.remote_type == "drive" and entry.id:
+                self.drive_folder_ids[(self.remote, entry.path)] = entry.id
             self.remote_path = entry.path
             self.load_remote()
 
@@ -2217,8 +2406,8 @@ class MainWindow(QMainWindow):
         else:
             remote, path, shared = self.remote, entry.path, self.shared
             folder_id, resource_key = self.link_folder_id, self.link_resource_key
-            if shared or folder_id:
-                get_size = lambda: GoogleDriveAPI(self.rclone, remote).calculate_size(entry)
+            if shared or folder_id or self.is_native_google(remote):
+                get_size = lambda: self.google_api(remote).calculate_size(entry)
             else:
                 get_size = lambda: self.rclone.size(remote, path)
         def done(result):
@@ -2263,10 +2452,12 @@ class MainWindow(QMainWindow):
             operation = lambda: folder.mkdir()
             refresh = self.load_local
         else:
-            if self.shared or self.link_folder_id:
-                parent_id = parent.id if parent else self.shared_folder_id
+            if self.shared or self.link_folder_id or self.is_native_google(self.remote):
+                parent_id = parent.id if parent else (self.shared_folder_id if (self.shared or self.link_folder_id) else
+                                                       self.drive_folder_ids.get((self.remote, self.remote_path), ""))
                 parent_key = parent.resource_key if parent else self.shared_folder_key
-                operation = lambda: GoogleDriveAPI(self.rclone, self.remote).create_folder(name, parent_id, parent_key)
+                operation = lambda: self.google_api().create_folder(
+                    name, parent_id or self.google_api().root_folder_id, parent_key)
             else:
                 path = "/".join(part for part in ((parent.path if parent else self.remote_path), name) if part)
                 operation = lambda: self.rclone.mutate("mkdir", self.remote, path)
@@ -2293,14 +2484,16 @@ class MainWindow(QMainWindow):
             parent = entry.path.rpartition("/")[0]
             target = f"{parent}/{name}" if parent else name
             def operation():
-                if self.shared or self.link_folder_id:
-                    api = GoogleDriveAPI(self.rclone, self.remote)
-                    siblings = api.list_files(folder_id=self.shared_folder_id, resource_key=self.shared_folder_key)
+                if self.shared or self.link_folder_id or self.is_native_google(self.remote):
+                    api = self.google_api()
+                    parent_id = (self.shared_folder_id if (self.shared or self.link_folder_id) else
+                                 self.drive_folder_ids.get((self.remote, parent), api.root_folder_id))
+                    siblings = api.list_files(folder_id=parent_id, resource_key=self.shared_folder_key)
                 else:
                     siblings = self.rclone.list(self.remote, parent)
                 if any(item.name.casefold() == name.casefold() for item in siblings):
                     raise RcloneError("An item with that name already exists.")
-                if self.shared or self.link_folder_id:
+                if self.shared or self.link_folder_id or self.is_native_google(self.remote):
                     api.rename(entry, name)
                 else:
                     self.rclone.mutate("moveto", self.remote, entry.path, destination=target)
@@ -2309,7 +2502,9 @@ class MainWindow(QMainWindow):
 
     def delete_entry(self, pane: FilePane, entry: Entry):
         detail = " and everything inside it" if entry.is_dir else ""
-        answer = QMessageBox.question(self, "Delete item", f"Delete {entry.name}{detail}?")
+        recoverable = not pane.local and self.is_native_google(self.remote)
+        action = "Move to Google Drive Trash" if recoverable else "Delete"
+        answer = QMessageBox.question(self, action + " item", f"{action} {entry.name}{detail}?")
         if answer != QMessageBox.StandardButton.Yes:
             return
         if pane.local:
@@ -2317,8 +2512,10 @@ class MainWindow(QMainWindow):
             operation = (lambda: shutil.rmtree(path)) if entry.is_dir else (lambda: path.unlink())
             refresh = self.load_local
         else:
-            if self.shared or self.link_folder_id:
-                operation = lambda: GoogleDriveAPI(self.rclone, self.remote).delete(entry)
+            if self.is_native_google(self.remote):
+                operation = lambda: self.google_api().trash(entry)
+            elif self.shared or self.link_folder_id:
+                operation = lambda: self.google_api().delete(entry)
             else:
                 operation = lambda: self.rclone.mutate("purge" if entry.is_dir else "deletefile", self.remote,
                                                        entry.path)
@@ -2380,7 +2577,7 @@ class MainWindow(QMainWindow):
 
     def start_transfer(self, upload: bool, *, entries: list[Entry] | None = None,
                        remote_folder: str | None = None, local_folder: Path | None = None):
-        if not self.rclone or not self.remote:
+        if not self.remote or (not self.rclone and not self.is_native_google(self.remote)):
             return
         selected = entries if entries is not None else (self.pc.selected() if upload else self.cloud.selected())
         if not selected:
@@ -2394,13 +2591,16 @@ class MainWindow(QMainWindow):
         # Keep the direct API path for uploads, where it is needed for shared
         # folder permissions. Downloads are faster and more resilient through
         # rclone, which can run parallel transfers and resume transient failures.
-        use_api = (self.shared or bool(self.link_folder_id)) and upload
+        native = self.is_native_google(self.remote)
+        use_api = native or ((self.shared or bool(self.link_folder_id)) and upload)
         parent_id, parent_key = self.shared_folder_id, self.shared_folder_key
+        if native and not (self.shared or self.link_folder_id):
+            parent_id = self.drive_folder_ids.get((self.remote, destination_remote), "")
         if use_api and upload and destination_remote != self.remote_path:
             target = next((item for item in self.cloud.entries if item.path == destination_remote and item.is_dir), None)
             if target:
                 parent_id, parent_key = target.id, target.resource_key
-        if use_api and upload and not parent_id:
+        if use_api and upload and not parent_id and not (native and not destination_remote):
             self.set_status("Open a shared folder before uploading.")
             return
         # Windows-style conflict handling for items that already exist at the destination.
@@ -2417,7 +2617,9 @@ class MainWindow(QMainWindow):
             if use_api:
                 worker = ApiTransferWorker(self.rclone, self.remote, entry, upload=upload,
                                            parent_id=parent_id, parent_key=parent_key,
-                                           local_folder=destination_local, replace=replace)
+                                           local_folder=destination_local, replace=replace,
+                                           auth=self.native_auth if native else None,
+                                           use_preferred=not native)
             else:
                 args = transfer_args(entry, self.remote, destination_remote, destination_local,
                                      upload=upload, shared=self.shared, replace=replace,
@@ -2476,7 +2678,8 @@ class MainWindow(QMainWindow):
             self.set_status(f"Cannot pause transfer: {exc}")
             return
         state["pause"].setText("Resume" if worker.paused else "Pause")
-        state["item"].setText(3, "Pausing after current chunk" if worker.paused and isinstance(worker, ApiTransferWorker)
+        state["item"].setText(3, "Pausing after current action" if worker.paused and isinstance(worker, NativeSyncWorker) else
+                              "Pausing after current chunk" if worker.paused and isinstance(worker, ApiTransferWorker)
                               else "Paused" if worker.paused else "Resuming")
         if worker.paused:
             state["speed_bps"] = 0
@@ -2536,6 +2739,14 @@ class MainWindow(QMainWindow):
     def transfer_progress(self, worker, event: dict):
         state = self.transfer_items.get(worker)
         if not state or not isinstance(event, dict):
+            return
+        if event.get("kind") == "sync_step":
+            total = max(1, event["total"])
+            state["bar"].setRange(0, 100)
+            state["bar"].setValue(int(event["index"] * 100 / total))
+            state["item"].setText(3, f"{event['action'].replace('_', ' ').title()}: {event['path']}")
+            state["item"].setText(4, f"{event['index']} / {event['total']} actions")
+            state["item"].setText(6, "—")
             return
         if event.get("kind") == "file_done":
             if state["is_dir"]:

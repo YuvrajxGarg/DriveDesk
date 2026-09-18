@@ -27,6 +27,8 @@ class Entry:
     id: str = ""
     resource_key: str = ""
     mime_type: str = ""
+    md5: str = ""
+    is_shortcut: bool = False
 
 
 def network_env() -> dict[str, str]:

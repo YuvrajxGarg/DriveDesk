@@ -9,6 +9,10 @@ from google_api import GoogleDriveAPI
 
 
 class GoogleApiTests(unittest.TestCase):
+    def test_zero_byte_file_keeps_its_size(self):
+        entry = GoogleDriveAPI._entry({"id": "empty", "name": "empty.txt", "mimeType": "text/plain", "size": "0"})
+        self.assertEqual(entry.size, 0)
+
     def api(self):
         api = GoogleDriveAPI.__new__(GoogleDriveAPI)
         api.remote = "test"
@@ -58,6 +62,30 @@ class GoogleApiTests(unittest.TestCase):
         api = self.api()
         api._json = lambda url, **kwargs: {"name": "UAE Eid Videos"}
         self.assertEqual(api.folder_name("folder-1", "key-1"), "UAE Eid Videos")
+
+    def test_my_drive_browses_configured_root_and_nested_folder(self):
+        api = self.api()
+        api.root_folder_id = "configured-root"
+        seen = []
+        def list_folder(*, folder_id, prefix):
+            seen.append((folder_id, prefix))
+            if folder_id == "configured-root":
+                return [Entry("Projects", "Projects", True, id="folder-1")]
+            return [Entry("brief.pdf", "Projects/brief.pdf", False, id="file-1")]
+        api.list_files = list_folder
+        self.assertEqual(api.list_my_drive("Projects")[0].id, "file-1")
+        self.assertEqual(seen, [("configured-root", ""), ("folder-1", "Projects")])
+        seen.clear()
+        self.assertEqual(api.list_my_drive("Projects", known_folder_id="folder-1")[0].id, "file-1")
+        self.assertEqual(seen, [("folder-1", "Projects")])
+
+    def test_my_drive_rejects_ambiguous_folder_names(self):
+        api = self.api()
+        api.root_folder_id = "root"
+        api.list_files = lambda **_kwargs: [Entry("Same", "Same", True, id="a"),
+                                             Entry("Same", "Same", True, id="b")]
+        with self.assertRaisesRegex(RcloneError, "ambiguous"):
+            api.list_my_drive("Same")
 
     def test_download_writes_file_and_reports_progress(self):
         api = self.api()
