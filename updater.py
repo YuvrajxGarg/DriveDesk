@@ -17,7 +17,7 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 GITHUB_REPO = "YuvrajxGarg/DriveDesk"
 
 

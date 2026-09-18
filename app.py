@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import shutil
 import subprocess
 import sys
 import time
 import uuid
+import urllib.request
 from pathlib import Path
 from threading import Event
 
@@ -555,6 +557,8 @@ class MainWindow(QMainWindow):
         self.workers = set()
         self.transfer_items = {}
         self.mounts: dict[str, subprocess.Popen] = {}
+        self.mount_rc_ports: dict[str, int] = {}
+        self.mount_items = {}
         self.transfer_opts = {
             "bwlimit": self.settings.value("opt/bwlimit", "") or "",
             "transfers": self.settings.value("opt/transfers", "") or "",
@@ -767,6 +771,9 @@ class MainWindow(QMainWindow):
         self.transfer_timer = QTimer(self)
         self.transfer_timer.timeout.connect(self.refresh_transfer_times)
         self.transfer_timer.start(1000)
+        self.mount_timer = QTimer(self)
+        self.mount_timer.timeout.connect(self.refresh_mount_stats)
+        self.mount_timer.start(1000)
         self.update_buttons()
 
     def set_status(self, message: str):
@@ -1061,6 +1068,10 @@ class MainWindow(QMainWindow):
         except RcloneError as exc:
             QMessageBox.warning(self, "Mount", str(exc))
             return
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            rc_port = probe.getsockname()[1]
+        args += ["--rc", "--rc-addr", f"127.0.0.1:{rc_port}", "--rc-no-auth"]
         try:
             proc = subprocess.Popen(
                 [self.rclone_path, *args], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -1070,6 +1081,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Mount", str(exc))
             return
         self.mounts[drive] = proc
+        self.mount_rc_ports[drive] = rc_port
         self.set_status(f"Mounting {remote}: on {drive}…")
         QTimer.singleShot(2800, lambda: self._check_mount(drive))
 
@@ -1084,6 +1096,7 @@ class MainWindow(QMainWindow):
             except OSError:
                 pass
             self.mounts.pop(drive, None)
+            self.mount_rc_ports.pop(drive, None)
             if "winfsp" in error.lower() or "cgofuse" in error.lower() or "fuse" in error.lower():
                 QMessageBox.warning(self, "WinFsp required",
                                     "Mounting needs WinFsp. Install it from https://winfsp.dev/rel/ "
@@ -1097,9 +1110,46 @@ class MainWindow(QMainWindow):
 
     def unmount(self, drive: str):
         proc = self.mounts.pop(drive, None)
+        self.mount_rc_ports.pop(drive, None)
+        item = self.mount_items.pop(drive, None)
+        if item is not None:
+            index = self.transfers.indexOfTopLevelItem(item)
+            if index >= 0:
+                self.transfers.takeTopLevelItem(index)
         if proc and proc.poll() is None:
             proc.terminate()
         self.set_status(f"Unmounted {drive}")
+
+    def refresh_mount_stats(self):
+        """Poll each mounted rclone process and surface its VFS activity."""
+        for drive, proc in list(self.mounts.items()):
+            if proc.poll() is not None:
+                self.mount_rc_ports.pop(drive, None)
+                continue
+            port = self.mount_rc_ports.get(drive)
+            if not port:
+                continue
+            try:
+                with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/core/stats?short=true", timeout=0.25) as response:
+                    stats = json.load(response)
+            except (OSError, ValueError):
+                continue
+            item = self.mount_items.get(drive)
+            if item is None:
+                item = QTreeWidgetItem(["Mount", f"{drive}:", self.account_display_name(),
+                                        "Mounted / idle", "", "", "—", "", ""])
+                for column in (1, 2, 4, 6, 7):
+                    item.setForeground(column, QColor("#73829a"))
+                self.transfers.addTopLevelItem(item)
+                self.mount_items[drive] = item
+            active = stats.get("transferring") or []
+            names = [str(entry.get("name", "")) for entry in active if entry.get("name")]
+            item.setText(3, f"Uploading · {len(names)} file(s)" if names else "Mounted / idle")
+            item.setText(4, f"{size_text(int(stats.get('bytes') or 0))} sent")
+            item.setText(6, speed_text(float(stats.get("speed") or 0)))
+            item.setText(7, ", ".join(names[:2]) + (" …" if len(names) > 2 else ""))
+        self.refresh_transfer_times()
 
     def show_rclone_version(self):
         if not self.rclone:
@@ -1306,6 +1356,7 @@ class MainWindow(QMainWindow):
             if proc.poll() is None:
                 proc.terminate()
             self.mounts.pop(drive, None)
+            self.mount_rc_ports.pop(drive, None)
         super().closeEvent(event)
 
     def choose_rclone(self):
@@ -2385,7 +2436,8 @@ class MainWindow(QMainWindow):
             self.load_remote()
 
     def clear_finished_transfers(self):
-        active_items = [state["item"] for state in self.transfer_items.values()]
+        active_items = ([state["item"] for state in self.transfer_items.values()] +
+                        list(self.mount_items.values()))
         for index in range(self.transfers.topLevelItemCount() - 1, -1, -1):
             item = self.transfers.topLevelItem(index)
             if not any(item is active for active in active_items):
@@ -2393,7 +2445,8 @@ class MainWindow(QMainWindow):
         self.refresh_transfer_times()
 
     def clear_failed_transfers(self):
-        active_items = [state["item"] for state in self.transfer_items.values()]
+        active_items = ([state["item"] for state in self.transfer_items.values()] +
+                        list(self.mount_items.values()))
         for index in range(self.transfers.topLevelItemCount() - 1, -1, -1):
             item = self.transfers.topLevelItem(index)
             done = not any(item is active for active in active_items)
@@ -2455,7 +2508,9 @@ class MainWindow(QMainWindow):
         if not total:
             self.transfer_summary.setText("No transfers yet")
         else:
-            self.transfer_summary.setText(f"{active} active · {total} total")
+            mounts = len(self.mount_items)
+            suffix = f" · {mounts} mount monitor{'s' if mounts != 1 else ''}" if mounts else ""
+            self.transfer_summary.setText(f"{active} active · {total} total{suffix}")
         for state in self.transfer_items.values():
             elapsed = self.elapsed_text(int(time.monotonic() - state["start"]))
             state["item"].setText(7, f"ETA {state['eta']} · {elapsed}")
