@@ -1,6 +1,7 @@
 import os
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -74,6 +75,47 @@ class SharedViewTests(unittest.TestCase):
         QThreadPool.globalInstance().waitForDone(2000)
         self.qt.processEvents()
 
+    def test_selecting_drive_account_does_not_eagerly_scan_shared_items(self):
+        real_find, real_rclone = app.find_rclone, app.Rclone
+        app.find_rclone = lambda _saved="": "fake-rclone"
+        app.Rclone = FakeRclone
+        try:
+            window = app.MainWindow()
+            QThreadPool.globalInstance().waitForDone(2000)
+            self.qt.processEvents()
+            window.remote = ""
+            window.shared = True
+            window.remote_types["test-drive"] = "drive"
+            window.load_shared_sidebar = lambda _remote: self.fail("Unrequested shared scan")
+            window.account_selected(SimpleNamespace(data=lambda _role: "test-drive"), None)
+            self.assertFalse(window.shared)
+            window.close()
+        finally:
+            app.find_rclone, app.Rclone = real_find, real_rclone
+
+    def test_refresh_shared_view_discards_cached_listing(self):
+        real_find, real_rclone = app.find_rclone, app.Rclone
+        app.find_rclone = lambda _saved="": "fake-rclone"
+        app.Rclone = FakeRclone
+        try:
+            window = app.MainWindow()
+            QThreadPool.globalInstance().waitForDone(2000)
+            self.qt.processEvents()
+            window.shared = True
+            window.remote_path = ""
+            window.owner_filter = None
+            window.shared_root = [Entry("Old", "Old", False)]
+            window.shared_next_token = "old-page"
+            calls = []
+            window.load_remote = lambda: calls.append(True)
+            window.refresh_remote()
+            self.assertEqual(window.shared_root, [])
+            self.assertEqual(window.shared_next_token, "")
+            self.assertEqual(calls, [True])
+            window.close()
+        finally:
+            app.find_rclone, app.Rclone = real_find, real_rclone
+
     def test_my_drive_uses_native_listing_and_remembers_folder_id(self):
         real_find, real_rclone = app.find_rclone, app.Rclone
         app.find_rclone = lambda _saved="": "fake-rclone"
@@ -106,6 +148,8 @@ class SharedViewTests(unittest.TestCase):
         app.Rclone = FakeRclone
         try:
             window = app.MainWindow()
+            QThreadPool.globalInstance().waitForDone(2000)
+            self.qt.processEvents()
             window.set_view(True)
             deadline = time.monotonic() + 3
             while time.monotonic() < deadline and "alex@example.com" not in [

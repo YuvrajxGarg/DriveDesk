@@ -15,7 +15,7 @@ Choose **Add Google account**. DriveDesk opens Google's consent page in your bro
 
 Google's broad Drive scope is classified as restricted. The OAuth consent screen and test-user or verification configuration for the supplied client ID must be correctly set up in Google Cloud before sign-in will work for other people. Existing rclone accounts are still listed separately; the new native Google account is not an automatic migration of an old rclone remote.
 
-Browse **My Drive** or **Shared with me** in the cloud pane. Shared entries are grouped by owner where Google provides owner metadata. Double-click folders to navigate. Drag files between panes or use the context menu for upload, download, rename, delete, and new folder. A transfer copies by default; it does not remove the source. Google-native deletions use Drive Trash. You can paste a Google Drive folder link using **Open shared link** if your account has access.
+Browse **My Drive** in the cloud pane. Open the **Shared with me** toggle only when you want to browse shared items; selecting an account and showing the Folders tree no longer scan them in the background. Shared entries are grouped by owner where Google provides owner metadata. Use Refresh to reload the shared listing. Double-click folders to navigate. Drag files between panes or use the context menu for upload, download, rename, delete, and new folder. A transfer copies by default; it does not remove the source. Google-native deletions use Drive Trash. You can paste a Google Drive folder link using **Open shared link** if your account has access.
 
 ## Native Google folder sync
 

@@ -678,7 +678,8 @@ class MainWindow(QMainWindow):
         self.account_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.account_btn.clicked.connect(self.show_accounts_menu)
         self.view_drive = self._toolbtn("My Drive", checkable=True)
-        self.view_shared = self._toolbtn("Shared", checkable=True)
+        self.view_shared = self._toolbtn("Shared with me", checkable=True)
+        self.view_shared.setToolTip("Load shared items only when you open this view")
         self.open_shared_link = self._toolbtn("Open link")
         self.open_shared_link.setToolTip("Open a shared folder link")
         self.view_drive.clicked.connect(lambda: self.set_view(False))
@@ -725,7 +726,7 @@ class MainWindow(QMainWindow):
         download_action.clicked.connect(lambda: self.start_transfer(False))
         self.cloud.top_row.addWidget(download_action)
         self.cloud.up.clicked.connect(self.remote_up)
-        self.cloud.refresh.clicked.connect(self.load_remote)
+        self.cloud.refresh.clicked.connect(self.refresh_remote)
         self.cloud.table.cellDoubleClicked.connect(self.remote_open)
         self.cloud.table.filesDropped.connect(self.cloud_drop)
         self.cloud.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -1851,10 +1852,9 @@ class MainWindow(QMainWindow):
             self.folder_history = []
             self.cloud.show_entries([])
             self.reset_shared_tree()
-            if self.remote_type == "drive":
-                self.load_shared_sidebar(remote)
-            else:
-                self.shared = False
+            # The shared collection can be enormous. Do not enumerate it just
+            # because an account was selected or the folder tree is visible.
+            self.shared = False
         self.load_remote()
 
     def set_view(self, shared: bool):
@@ -1868,6 +1868,12 @@ class MainWindow(QMainWindow):
         self.folder_history = []
         self.cloud.show_entries([])
         self.update_buttons()
+        self.load_remote()
+
+    def refresh_remote(self):
+        if self.shared and not self.remote_path and not self.owner_filter:
+            self.shared_root = []
+            self.shared_next_token = ""
         self.load_remote()
 
     def open_link(self):

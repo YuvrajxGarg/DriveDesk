@@ -9,6 +9,7 @@ import json
 import hashlib
 import mimetypes
 import os
+import random
 import re
 import socket
 import time
@@ -34,6 +35,23 @@ EXPORTS = {
     "application/vnd.google-apps.drawing": ("image/svg+xml", ".svg"),
 }
 FIELDS = "nextPageToken,files(id,name,mimeType,size,md5Checksum,modifiedTime,resourceKey,owners(emailAddress,displayName),sharingUser(emailAddress,displayName),shortcutDetails(targetId,targetMimeType,targetResourceKey),capabilities(canDownload,canAddChildren))"
+
+
+class DriveRateLimitError(RcloneError):
+    """A temporary Google API rate limit, not a partial folder listing."""
+
+
+def _rate_limited(status: int, detail: str) -> bool:
+    if status == 429:
+        return True
+    if status != 403:
+        return False
+    try:
+        error = json.loads(detail).get("error") or {}
+        reasons = [item.get("reason", "") for item in error.get("errors", [])]
+    except (ValueError, TypeError, AttributeError):
+        reasons = []
+    return any(reason in {"rateLimitExceeded", "userRateLimitExceeded"} for reason in reasons)
 
 
 class GoogleDriveAPI:
@@ -150,7 +168,9 @@ class GoogleDriveAPI:
         additional = dict(headers or {})
         if resource_id and resource_key:
             additional["X-Goog-Drive-Resource-Keys"] = f"{resource_id}/{resource_key}"
-        for attempt in range(2):
+        rate_retries = 0
+        refreshed = False
+        while True:
             request = urllib.request.Request(
                 url, data=data, method=method,
                 headers={"Authorization": f"Bearer {self.token}", "Accept": "application/json", **additional},
@@ -166,16 +186,22 @@ class GoogleDriveAPI:
             except urllib.error.HTTPError as exc:
                 if exc.code == 308 and allow_incomplete:
                     return exc
-                detail = exc.read(500).decode("utf-8", "replace")
-                if exc.code == 401 and attempt == 0:
+                detail = exc.read(2000).decode("utf-8", "replace")
+                if exc.code == 401 and not refreshed:
                     self._refresh_token()
+                    refreshed = True
                     continue
-                if exc.code in (403, 429) and ("rateLimitExceeded" in detail or "Quota exceeded" in detail):
-                    raise RcloneError("Google Drive API request quota reached. More shared items will load after the quota resets.") from exc
+                if _rate_limited(exc.code, detail):
+                    if method in {"GET", "HEAD"} and rate_retries < 3:
+                        time.sleep(min(2 ** rate_retries + random.random(), 5))
+                        rate_retries += 1
+                        continue
+                    advice = ("Use Add Google account for direct sign-in, or try Refresh later."
+                              if self.auth is None else "Try Refresh in a minute.")
+                    raise DriveRateLimitError(f"Google Drive is temporarily rate-limited. {advice}") from exc
                 raise RcloneError(f"Google Drive API returned HTTP {exc.code}: {detail[:240]}") from exc
             except OSError as exc:
                 raise RcloneError(f"Google Drive API connection failed: {exc}") from exc
-        raise RcloneError("Google Drive authorization failed")
 
     def _json(self, url: str, **kwargs) -> dict:
         with self._open(url, **kwargs) as response:
@@ -212,12 +238,7 @@ class GoogleDriveAPI:
             if page_token:
                 params["pageToken"] = page_token
             url = "https://www.googleapis.com/drive/v3/files?" + urllib.parse.urlencode(params)
-            try:
-                data = self._json(url, resource_id=folder_id, resource_key=resource_key)
-            except RcloneError as exc:
-                if entries and "quota" in str(exc).lower():
-                    return entries
-                raise
+            data = self._json(url, resource_id=folder_id, resource_key=resource_key)
             batch = []
             for row in data.get("files", []):
                 entry = self._entry(row, prefix)

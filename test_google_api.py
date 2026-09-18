@@ -1,11 +1,13 @@
 import io
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from threading import Event
+from unittest.mock import patch
 
 from drive_backend import Entry, RcloneError
-from google_api import GoogleDriveAPI
+from google_api import DriveRateLimitError, GoogleDriveAPI, _rate_limited
 
 
 class GoogleApiTests(unittest.TestCase):
@@ -17,6 +19,7 @@ class GoogleApiTests(unittest.TestCase):
         api = GoogleDriveAPI.__new__(GoogleDriveAPI)
         api.remote = "test"
         api.token = "test-token"
+        api.auth = None
         return api
 
     def test_shared_pages_and_owner_groups(self):
@@ -34,7 +37,7 @@ class GoogleApiTests(unittest.TestCase):
         self.assertEqual({entry.owner for entry in entries}, {"Alex", "sam@example.com"})
         self.assertEqual(entries[0].id, "folder-1")
 
-    def test_rate_limit_keeps_loaded_shared_page(self):
+    def test_rate_limit_never_returns_incomplete_folder(self):
         api = self.api()
         first = {"files": [{"id": "file-1", "name": "Shared.txt", "mimeType": "text/plain"}],
                  "nextPageToken": "next"}
@@ -44,12 +47,34 @@ class GoogleApiTests(unittest.TestCase):
             calls += 1
             if calls == 1:
                 return first
-            raise RcloneError("Google Drive API request quota reached")
+            raise DriveRateLimitError("Google Drive is temporarily rate-limited")
         api._json = fetch
         pages = []
-        entries = api.list_files(on_page=lambda batch, token: pages.append((len(batch), token)))
-        self.assertEqual(len(entries), 1)
+        with self.assertRaises(DriveRateLimitError):
+            api.list_files(on_page=lambda batch, token: pages.append((len(batch), token)))
         self.assertEqual(pages, [(1, "next")])
+
+    def test_rate_limit_parser_distinguishes_storage_quota(self):
+        self.assertTrue(_rate_limited(403, '{"error":{"errors":[{"reason":"userRateLimitExceeded"}]}}'))
+        self.assertTrue(_rate_limited(429, ""))
+        self.assertFalse(_rate_limited(403, '{"error":{"errors":[{"reason":"storageQuotaExceeded"}]}}'))
+
+    def test_get_retries_transient_rate_limit_then_succeeds(self):
+        api = self.api()
+        calls = []
+        class Opener:
+            def open(self, request, timeout):
+                calls.append(request)
+                if len(calls) == 1:
+                    raise urllib.error.HTTPError(request.full_url, 403, "rate limit", {},
+                                                 io.BytesIO(b'{"error":{"errors":[{"reason":"rateLimitExceeded"}]}}'))
+                return io.BytesIO(b'{}')
+        with patch("google_api.urllib.request.build_opener", return_value=Opener()), patch(
+                "google_api.time.sleep") as sleep, patch("google_api.random.random", return_value=0):
+            with api._open("https://www.googleapis.com/drive/v3/files"):
+                pass
+        self.assertEqual(len(calls), 2)
+        sleep.assert_called_once_with(1)
 
     def test_verified_mapping_fingerprint_changes_with_credentials(self):
         config = {"one": {"token": '{"refresh_token":"a"}'},
