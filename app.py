@@ -1024,13 +1024,22 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("Mount remote as drive")
         form = QFormLayout(dialog)
-        form.addRow(QLabel(f"Mount {self.account_display_name()} as a Windows drive.\n"
+        mount_context = ("Opened shared folder" if self.link_folder_id else
+                         "Shared with me" if self.shared else "My Drive")
+        form.addRow(QLabel(f"Mount {self.account_display_name()} — {mount_context} — as a Windows drive.\n"
                            "Requires WinFsp (winfsp.dev) installed."))
         path_edit = QLineEdit(self.remote_path)
         path_edit.setPlaceholderText("Subfolder, or blank for the whole remote")
+        shared_check = QCheckBox("Mount Shared with me")
+        shared_check.setChecked(self.shared)
+        if self.link_folder_id:
+            shared_check.setChecked(False)
+            shared_check.setEnabled(False)
+            shared_check.setToolTip("Opened shared links are mounted using their folder ID.")
         letter = QComboBox()
         letter.addItems(letters)
         form.addRow("Folder (optional)", path_edit)
+        form.addRow("View", shared_check)
         form.addRow("Drive letter", letter)
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -1040,11 +1049,15 @@ class MainWindow(QMainWindow):
         form.addRow(buttons)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        self.do_mount(self.remote, path_edit.text().strip(), letter.currentText())
+        self.do_mount(self.remote, path_edit.text().strip(), letter.currentText(),
+                      shared=shared_check.isChecked(), folder_id=self.link_folder_id,
+                      resource_key=self.link_resource_key)
 
-    def do_mount(self, remote: str, path: str, drive: str):
+    def do_mount(self, remote: str, path: str, drive: str, *, shared: bool = False,
+                 folder_id: str = "", resource_key: str = ""):
         try:
-            args = mount_args(remote, path, drive)
+            args = mount_args(remote, path, drive, shared=shared,
+                              folder_id=folder_id, resource_key=resource_key)
         except RcloneError as exc:
             QMessageBox.warning(self, "Mount", str(exc))
             return

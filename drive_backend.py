@@ -532,7 +532,9 @@ def sync_args(source: str, destination: str, mode: str, *, dry_run: bool = False
     return args
 
 
-def mount_args(remote: str, path: str, drive: str, *, extra: list[str] | None = None) -> list[str]:
+def mount_args(remote: str, path: str, drive: str, *, shared: bool = False,
+               folder_id: str = "", resource_key: str = "",
+               extra: list[str] | None = None) -> list[str]:
     """Build an rclone mount command exposing a remote as a Windows drive letter."""
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,40}", remote):
         raise RcloneError("Invalid remote name")
@@ -541,6 +543,12 @@ def mount_args(remote: str, path: str, drive: str, *, extra: list[str] | None = 
     target = f"{remote}:{path}" if path else f"{remote}:"
     args = ["mount", target, drive, "--vfs-cache-mode", "full",
             "--volname", f"DriveDesk-{remote}"]
+    if shared:
+        args.append("--drive-shared-with-me")
+    if folder_id:
+        args.extend(["--drive-root-folder-id", folder_id])
+        if resource_key:
+            args.extend(["--drive-resource-key", resource_key])
     if extra:
         args += list(extra)
     return args
