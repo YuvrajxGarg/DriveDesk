@@ -2,6 +2,10 @@
 
 from pathlib import Path
 
+# Use the branded icon when present; fall back gracefully so a fresh checkout
+# without the generated asset still builds. Run `python make_icon.py` to create it.
+_icon = 'assets/icon.ico' if Path('assets/icon.ico').is_file() else None
+
 a = Analysis(
     ['app.py'],
     pathex=[],
@@ -41,4 +45,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=_icon,
 )

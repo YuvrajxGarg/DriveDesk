@@ -9,6 +9,7 @@ import json
 import hashlib
 import mimetypes
 import os
+import socket
 import time
 from datetime import datetime, timezone
 import urllib.error
@@ -271,20 +272,53 @@ class GoogleDriveAPI:
         local_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = local_path.with_name(local_path.name + ".drivedesk-part")
         started = time.monotonic()
-        done = 0
+        done = temporary.stat().st_size if temporary.exists() else 0
+        retries = 0
         try:
-            with self._open(url, resource_id=entry.id, resource_key=entry.resource_key) as response, temporary.open("wb") as target:
-                total = int(response.headers.get("Content-Length") or entry.size or 0)
-                while True:
-                    if cancelled.is_set():
-                        raise RcloneError("Cancelled")
-                    chunk = response.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    target.write(chunk)
-                    done += len(chunk)
-                    progress(done, total, started)
-            os.replace(temporary, local_path)
+            while True:
+                if cancelled.is_set():
+                    raise RcloneError("Cancelled")
+                headers = {"Range": f"bytes={done}-"} if done else None
+                try:
+                    with self._open(url, headers=headers, resource_id=entry.id,
+                                    resource_key=entry.resource_key) as response:
+                        # A server may ignore Range. Never append a full response to a
+                        # partial file, or the resulting file will be corrupt.
+                        resumed = done > 0 and getattr(response, "status", 200) == 206
+                        if done and not resumed:
+                            done = 0
+                        content_range = response.headers.get("Content-Range", "")
+                        total = int(response.headers.get("Content-Length") or entry.size or 0)
+                        if resumed and "/" in content_range:
+                            try:
+                                total = int(content_range.rsplit("/", 1)[1])
+                            except ValueError:
+                                pass
+                        mode = "ab" if resumed else "wb"
+                        with temporary.open(mode) as target:
+                            while True:
+                                if cancelled.is_set():
+                                    raise RcloneError("Cancelled")
+                                chunk = response.read(1024 * 1024)
+                                if not chunk:
+                                    break
+                                target.write(chunk)
+                                done += len(chunk)
+                                progress(done, total, started)
+                    os.replace(temporary, local_path)
+                    break
+                except RcloneError as exc:
+                    transient = any(word in str(exc).lower() for word in
+                                    ("timed out", "timeout", "connection failed", "reset"))
+                    if not transient or retries >= 4:
+                        raise
+                    retries += 1
+                    time.sleep(min(2 ** retries, 8))
+                except (OSError, socket.timeout, TimeoutError) as exc:
+                    if cancelled.is_set() or retries >= 4:
+                        raise RcloneError(f"Google Drive download interrupted: {exc}") from exc
+                    retries += 1
+                    time.sleep(min(2 ** retries, 8))
         finally:
             if temporary.exists():
                 temporary.unlink()
